@@ -8,7 +8,11 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef HAVE_ZLIB
 #include <zlib.h>
+#else
+#include <stdio.h>
+#endif
 
 #include "redump.h"
 
@@ -37,7 +41,11 @@ fd_rd_dump_env_init(void);
 struct fd_rd_output {
    char *name;
    bool combine;
+#ifdef HAVE_ZLIB
    gzFile file;
+#else
+   FILE *file;
+#endif
 
    int trigger_fd;
    uint32_t trigger_count;

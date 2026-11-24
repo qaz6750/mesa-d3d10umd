@@ -90,9 +90,15 @@ fd_rd_output_init(struct fd_rd_output *output, const char* output_name)
       output->combine = true;
 
       char file_path[PATH_MAX];
+#ifdef HAVE_ZLIB
       snprintf(file_path, sizeof(file_path), "%s/%s_combined.rd.gz",
                fd_rd_output_base_path, output->name);
       output->file = gzopen(file_path, "w");
+#else
+      snprintf(file_path, sizeof(file_path), "%s/%s_combined.rd",
+               fd_rd_output_base_path, output->name);
+      output->file = fopen(file_path, "wb");
+#endif
    }
 
    if (FD_RD_DUMP(TRIGGER)) {
@@ -111,7 +117,11 @@ fd_rd_output_fini(struct fd_rd_output *output)
 
    if (output->file != NULL) {
       assert(output->combine);
+#ifdef HAVE_ZLIB
       gzclose(output->file);
+#else
+      fclose(output->file);
+#endif
    }
 
    if (output->trigger_fd >= 0) {
@@ -213,8 +223,12 @@ fd_rd_output_begin(struct fd_rd_output *output, uint32_t submit_idx)
    char file_path[PATH_MAX];
    snprintf(file_path, sizeof(file_path), "%s/%s_%.5d.rd",
             fd_rd_output_base_path, output->name, submit_idx);
+#ifdef HAVE_ZLIB
    output->file = gzopen(file_path, "w");
-   return true;
+#else
+   output->file = fopen(file_path, "wb");
+#endif
+   return output->file != NULL;
 }
 
 static void
@@ -222,12 +236,21 @@ fd_rd_output_write(struct fd_rd_output *output, const void *buffer, int size)
 {
    const uint8_t *pos = (uint8_t *) buffer;
    while (size > 0) {
+#ifdef HAVE_ZLIB
       int ret = gzwrite(output->file, pos, size);
-      if (ret < 0) {
+      if (ret <= 0) {
          mesa_loge("[fd_rd_output] failed to write to compressed output: %s",
                    gzerror(output->file, NULL));
          return;
       }
+#else
+      size_t written = fwrite(pos, 1, size, output->file);
+      if (written == 0) {
+         mesa_loge("[fd_rd_output] failed to write uncompressed output");
+         return;
+      }
+      int ret = (int)written;
+#endif
       pos += ret;
       size -= ret;
    }
@@ -251,10 +274,18 @@ fd_rd_output_end(struct fd_rd_output *output)
     * store all the data before any problem during the submit itself occurs.
     */
    if (output->combine) {
+#ifdef HAVE_ZLIB
       gzflush(output->file, Z_FINISH);
+#else
+      fflush(output->file);
+#endif
       return;
    }
 
+#ifdef HAVE_ZLIB
    gzclose(output->file);
+#else
+   fclose(output->file);
+#endif
    output->file = NULL;
 }
