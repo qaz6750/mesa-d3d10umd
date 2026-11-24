@@ -1069,8 +1069,10 @@ fd_screen_create(int fd,
    if (FD_DBG(NOBIN))
       fd_binning_enabled = false;
 
-   if (!screen)
+   if (!screen) {
+      fd_device_del(dev);
       return NULL;
+   }
 
 #ifdef HAVE_PERFETTO
    fd_perfetto_init();

@@ -39,13 +39,11 @@
 
 #include "util/u_memory.h"
 
+#ifdef FD_WDDM
+#include "freedreno/drm/wddm/qcdx_escape.h"
+#endif
 
 static HRESULT APIENTRY CloseAdapter(D3D10DDI_HADAPTER hAdapter);
-
-static unsigned long numAdapters = 0;
-#if 0
-static unsigned long memdbg_no = 0;
-#endif
 
 /*
  * ----------------------------------------------------------------------
@@ -61,18 +59,29 @@ static unsigned long memdbg_no = 0;
 static HRESULT
 OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
-#if 0
-   if (numAdapters == 0) {
-      memdbg_no = debug_memory_begin();
-   }
+   if (!pOpenData || !pOpenData->pAdapterCallbacks || !pOpenData->pAdapterFuncs)
+      return E_INVALIDARG;
+
+#ifdef FD_WDDM
+   /* The render KMD returns its family marker before a device exists.
+    * fd_wddm_open checks the device's A660 identity and ABI at CreateDevice. */
+   if (!pOpenData->pAdapterCallbacks->pfnQueryAdapterInfoCb)
+      return E_INVALIDARG;
+   unsigned marker = 0;
+   D3DDDICB_QUERYADAPTERINFO query = {};
+   query.pPrivateDriverData = &marker;
+   query.PrivateDriverDataSize = sizeof(marker);
+   HRESULT hr = pOpenData->pAdapterCallbacks->pfnQueryAdapterInfoCb(
+      pOpenData->hRTAdapter.handle, &query);
+   if (FAILED(hr))
+      return hr;
+   if (hr != S_OK || marker != QCDX_ESC_MAGIC)
+      return DXGI_ERROR_UNSUPPORTED;
 #endif
-   ++numAdapters;
 
    Adapter *pAdaptor = (Adapter *)calloc(sizeof *pAdaptor, 1);
-   if (!pAdaptor) {
-      --numAdapters;
+   if (!pAdaptor)
       return E_OUTOFMEMORY;
-   }
 
    pOpenData->hAdapter.pDrvPrivate = pAdaptor;
 
@@ -114,6 +123,8 @@ OpenAdapter10(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
     * This is checked here and not on the common code because MSDN docs
     * state that it should be ignored on OpenAdapter10_2.
     */
+   if (!pOpenData)
+      return E_INVALIDARG;
    switch (pOpenData->Interface) {
    case D3D10_0_DDI_INTERFACE_VERSION:
    case D3D10_0_x_DDI_INTERFACE_VERSION:
@@ -264,13 +275,6 @@ CloseAdapter(D3D10DDI_HADAPTER hAdapter)  // IN
 
    Adapter *pAdapter = CastAdapter(hAdapter);
    free(pAdapter);
-
-   --numAdapters;
-#if 0
-   if (numAdapters == 0) {
-      debug_memory_end(memdbg_no);
-   }
-#endif
 
    return S_OK;
 }

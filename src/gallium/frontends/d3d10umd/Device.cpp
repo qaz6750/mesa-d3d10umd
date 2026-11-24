@@ -52,6 +52,7 @@ extern "C" void fd_wddm_detach(void *ctx);   /* qcdxkm: freedreno/drm/wddm/fd_wd
 
 EXTERN_C struct pipe_screen *
 d3d10_create_screen(gdikmt_device *device);
+EXTERN_C void d3d10_destroy_screen(struct pipe_screen *screen);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -68,6 +69,29 @@ static void APIENTRY CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,
 static void APIENTRY SetTextFilterSize(D3D10DDI_HDEVICE hDevice, UINT Width, UINT Height);
 
 EXTERN_C bool use_old_tex_ops = false;
+
+static void
+ReleaseDeviceBackend(Device *device)
+{
+   if (device->pipe)
+      device->pipe->destroy(device->pipe);
+   if (device->screen)
+      d3d10_destroy_screen(device->screen);
+   fd_wddm_detach(&device->device.base);
+   device->device.base.destroy(&device->device.base);
+   mtx_destroy(&device->CreateResourceMtx);
+}
+
+static void
+ReleaseInitialStates(Device *device)
+{
+   if (device->cso)
+      cso_destroy_context(device->cso);
+   if (device->empty_fs)
+      DeleteEmptyShader(device, PIPE_SHADER_FRAGMENT, device->empty_fs);
+   if (device->empty_vs)
+      DeleteEmptyShader(device, PIPE_SHADER_VERTEX, device->empty_vs);
+}
 
 /*
  * ----------------------------------------------------------------------
@@ -148,18 +172,33 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->hRTCoreLayer = pCreateData->hRTCoreLayer;
    pDevice->UMCallbacks = *pCreateData->pUMCallbacks;
 
-   mtx_init(&pDevice->CreateResourceMtx, mtx_plain);
+   if (mtx_init(&pDevice->CreateResourceMtx, mtx_plain) != thrd_success)
+      return E_OUTOFMEMORY;
 
    struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base);
-   struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+   if (!screen) {
+      ReleaseDeviceBackend(pDevice);
+      return DXGI_ERROR_UNSUPPORTED;
+   }
    pDevice->screen = screen;
+   struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
    pDevice->pipe = pipe;
-   pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   if (pipe)
+      pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   if (!pDevice->cso) {
+      ReleaseDeviceBackend(pDevice);
+      return E_OUTOFMEMORY;
+   }
 
    pDevice->empty_vs = CreateEmptyShader(pDevice, PIPE_SHADER_VERTEX);
    pDevice->velems_changed = true;
    pDevice->dss = NULL;              /* qcdxkm: current depth-stencil state */   /* qcdxkm: bind (empty) vertex elements before the first draw */
    pDevice->empty_fs = CreateEmptyShader(pDevice, PIPE_SHADER_FRAGMENT);
+   if (!pDevice->empty_vs || !pDevice->empty_fs) {
+      ReleaseInitialStates(pDevice);
+      ReleaseDeviceBackend(pDevice);
+      return E_OUTOFMEMORY;
+   }
 
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
    pipe->bind_fs_state(pipe, pDevice->empty_fs);
@@ -352,10 +391,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    TopazScFixDestroy(pDevice);   /* qcdxkm: per-device scissor strip scratch texture */
    pipe->bind_fs_state(pipe, NULL);
    pipe->bind_vs_state(pipe, NULL);
-   cso_destroy_context(pDevice->cso);
-
-   DeleteEmptyShader(pDevice, PIPE_SHADER_FRAGMENT, pDevice->empty_fs);
-   DeleteEmptyShader(pDevice, PIPE_SHADER_VERTEX, pDevice->empty_vs);
+   ReleaseInitialStates(pDevice);
 
    pipe_surface_reference(&pDevice->fb.zsbuf, NULL);
    for (i = 0; i < PIPE_MAX_COLOR_BUFS; ++i) {
@@ -379,12 +415,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    pipe->set_sampler_views(pipe, PIPE_SHADER_GEOMETRY, 0,
                            PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
 
-   pipe->destroy(pipe);
-   pDevice->screen->destroy(pDevice->screen);
-   fd_wddm_detach(&pDevice->device.base);   /* qcdxkm: its escape context dies with the device */
-   pDevice->device.base.destroy(&pDevice->device.base);
-
-   mtx_destroy(&pDevice->CreateResourceMtx);
+   ReleaseDeviceBackend(pDevice);
 }
 
 

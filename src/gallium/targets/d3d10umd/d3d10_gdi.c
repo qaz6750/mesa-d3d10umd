@@ -35,6 +35,7 @@
 #include "sw/gdi/gdi_sw_winsys.h"
 #include "virgl/gdi/virgl_gdi_public.h"
 #ifdef GALLIUM_FREEDRENO
+#include <unistd.h>
 #include "xf86drm.h"
 #include "util/xmlconfig.h"
 #include "util/driconf.h"
@@ -48,8 +49,6 @@ struct pipe_screen *fd_screen_create(int fd, const struct pipe_screen_config *co
 static const driOptionDescription fd_driconf[] = {
 #include "freedreno/driinfo_freedreno.h"
 };
-static driOptionCache fd_options;
-static struct pipe_screen_config fd_config;
 
 /* renderonly.c needs libdrm and is not built on Windows; freedreno only calls these when
  * screen->ro != NULL, and we always pass NULL. */
@@ -70,7 +69,7 @@ static int
 d3d10_fd_escape(void *ctx, void *data, unsigned size)
 {
    struct gdikmt_device *device = (struct gdikmt_device *)ctx;
-   return device->escape(device, data, size) >= 0 ? 0 : -1;
+   return device->escape(device, data, size) == 0 ? 0 : -1;
 }
 #endif
 
@@ -79,6 +78,15 @@ d3d10_fd_escape(void *ctx, void *data, unsigned size)
 
 extern struct pipe_screen *
 d3d10_create_screen(struct gdikmt_device* device);
+
+void
+d3d10_destroy_screen(struct pipe_screen *screen)
+{
+   screen->destroy(screen);
+#if defined(GALLIUM_FREEDRENO) && !defined(GALLIUM_VIRGL)
+   glsl_type_singleton_decref();
+#endif
+}
 
 HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
@@ -113,13 +121,19 @@ d3d10_create_screen(struct gdikmt_device* device)
          return NULL;
       /* freedreno/NIR need the GLSL type cache; on Linux the GL frontend creates it */
       glsl_type_singleton_init_or_ref();
-      if (!fd_config.options) {
-         driParseOptionInfo(&fd_options, fd_driconf, ARRAY_SIZE(fd_driconf));
-         fd_config.options = &fd_options;
-         fd_config.options_info = &fd_options;
-      }
-      screen = fd_screen_create(fd, &fd_config, NULL);
-      return screen ? debug_screen_wrap(screen) : NULL;
+      driOptionCache info = {0}, options = {0};
+      struct pipe_screen_config config = {.options_info = &info, .options = &options};
+      driParseOptionInfo(&info, fd_driconf, ARRAY_SIZE(fd_driconf));
+      screen = fd_screen_create(fd, &config, NULL);
+      /* fd_screen_create takes its own duplicate and copies the options. */
+      fd_wddm_close(fd);
+      driDestroyOptionCache(&options);
+      driDestroyOptionInfo(&info);
+      if (screen)
+         screen = debug_screen_wrap(screen);
+      if (!screen)
+         glsl_type_singleton_decref();
+      return screen;
    }
 #endif
 
