@@ -2,7 +2,7 @@
  * Escape protocol between the freedreno WDDM shim (Mesa UMD) and the qcdxkm WDDM KMD.
  * One escape = one Linux msm DRM ioctl: the KMD implements the msm driver's ioctls
  * (include/drm-uapi/msm_drm.h) plus the generic GEM ones, with the same structs.
- * Shared by both sides (matching copies in drivers/qcdxkm and mesa-overlay).
+ * Keep the copies in qcdxkm and mesa-d3d10umd identical.
  */
 #ifndef QCDX_ESCAPE_H
 #define QCDX_ESCAPE_H
