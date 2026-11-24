@@ -359,10 +359,27 @@ bo_del(struct fd_bo *bo)
    bo->funcs->destroy(bo);
 }
 
+/* qcdxkm debug: why freed BOs skip the cache */
+unsigned fd_dbg_del_suballoc, fd_dbg_del_nocache, fd_dbg_del_bocache, fd_dbg_del_ringcache, fd_dbg_del_shared;
+
+void
+fd_bo_del_debug_stats(unsigned *v)
+{
+   v[0] = fd_dbg_del_suballoc; v[1] = fd_dbg_del_nocache; v[2] = fd_dbg_del_bocache; v[3] = fd_dbg_del_ringcache;
+   v[4] = fd_dbg_del_shared;
+   fd_dbg_del_suballoc = fd_dbg_del_nocache = fd_dbg_del_bocache = fd_dbg_del_ringcache = fd_dbg_del_shared = 0;
+}
+
 static bool
 try_recycle(struct fd_bo *bo)
 {
    struct fd_device *dev = bo->dev;
+
+   if (suballoc_bo(bo)) fd_dbg_del_suballoc++;
+   else if (bo->bo_reuse == BO_CACHE) fd_dbg_del_bocache++;
+   else if (bo->bo_reuse == RING_CACHE) fd_dbg_del_ringcache++;
+   else fd_dbg_del_nocache++;
+   if (bo->alloc_flags & (FD_BO_SHARED | _FD_BO_NOSYNC)) fd_dbg_del_shared++;
 
    /* No point in BO cache for suballocated buffers: */
    if (suballoc_bo(bo))

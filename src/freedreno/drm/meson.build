@@ -46,6 +46,10 @@ libfreedreno_drm_msm_files = files(
 )
 libfreedreno_drm_files += libfreedreno_drm_msm_files
 
+if host_machine.system() == 'windows'
+  libfreedreno_drm_files += files('wddm/fd_wddm.c')
+endif
+
 libfreedreno_drm_virtio_files = files(
   'virtio/virtio_bo.c',
   'virtio/virtio_device.c',
@@ -73,7 +77,7 @@ libfreedreno_drm = static_library(
   gnu_symbol_visibility : 'hidden',
   dependencies : libfreedreno_drm_deps,
   # TODO
-  link_with : [libvdrm],
+  link_with : (host_machine.system() == 'windows') ? [] : [libvdrm],
   build_by_default : false,
 )
 

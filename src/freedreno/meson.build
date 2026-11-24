@@ -28,7 +28,7 @@ subdir('ir2')
 subdir('ir3')
 subdir('fdl')
 
-if system_has_kms_drm
+if system_has_kms_drm or host_machine.system() == 'windows'
   subdir('drm')
 endif
 

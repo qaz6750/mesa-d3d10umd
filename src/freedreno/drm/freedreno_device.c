@@ -147,7 +147,13 @@ fail:
 struct fd_device *
 fd_device_new_dup(int fd)
 {
+#ifdef FD_WDDM
+   int dup_fd = fd_wddm_dup(fd);
+#else
    int dup_fd = os_dupfd_cloexec(fd);
+#endif
+   if (dup_fd < 0)
+      return NULL;
    struct fd_device *dev = fd_device_new(dup_fd);
    if (dev)
       dev->closefd = 1;

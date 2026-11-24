@@ -28,6 +28,10 @@
 #include "freedreno_drm_perfetto.h"
 #include "freedreno_priv.h"
 
+/* qcdxkm debug counters (read by fd_bo_cache_debug_stats) */
+unsigned fd_dbg_cache_hits, fd_dbg_cache_miss, fd_dbg_cache_busy, fd_dbg_cache_put, fd_dbg_cache_expire,
+         fd_dbg_cache_nobucket;
+
 #define FD_BO_CACHE_STATS 0
 
 #define BO_CACHE_LOG(cache, fmt, ...) do {                      \
@@ -172,6 +176,7 @@ fd_bo_cache_cleanup(struct fd_bo_cache *cache, time_t time)
          VG_BO_OBTAIN(bo);
          bo_remove_from_bucket(bucket, bo);
          bucket->expired++;
+         fd_dbg_cache_expire++;
          list_addtail(&bo->node, &freelist);
          fd_alloc_log(bo, FD_ALLOC_CACHE, FD_ALLOC_NONE);
 
@@ -208,6 +213,16 @@ get_bucket(struct fd_bo_cache *cache, uint32_t size)
    return NULL;
 }
 
+
+void
+fd_bo_cache_debug_stats(unsigned *v)
+{
+   v[0] = fd_dbg_cache_hits; v[1] = fd_dbg_cache_miss; v[2] = fd_dbg_cache_busy;
+   v[3] = fd_dbg_cache_put; v[4] = fd_dbg_cache_expire; v[5] = fd_dbg_cache_nobucket;
+   fd_dbg_cache_hits = fd_dbg_cache_miss = fd_dbg_cache_busy = fd_dbg_cache_put = fd_dbg_cache_expire = 0;
+   fd_dbg_cache_nobucket = 0;
+}
+
 static struct fd_bo *
 find_in_bucket(struct fd_bo_bucket *bucket, uint32_t flags)
 {
@@ -222,6 +237,7 @@ find_in_bucket(struct fd_bo_bucket *bucket, uint32_t flags)
     */
    foreach_bo (entry, &bucket->list) {
       if (fd_bo_state(entry) != FD_BO_STATE_IDLE) {
+         fd_dbg_cache_busy++;
          break;
       }
       if (entry->alloc_flags == flags) {
@@ -266,10 +282,14 @@ retry:
          p_atomic_set(&bo->refcnt, 1);
          bo->reloc_flags = FD_RELOC_FLAGS_INIT;
          bucket->hits++;
+         fd_dbg_cache_hits++;
          fd_alloc_log(bo, FD_ALLOC_CACHE, FD_ALLOC_ACTIVE);
          return bo;
       }
       bucket->misses++;
+      fd_dbg_cache_miss++;
+   } else {
+      fd_dbg_cache_nobucket++;
    }
 
    fd_bo_del_list_nocache(&freelist);
@@ -303,6 +323,7 @@ fd_bo_cache_free(struct fd_bo_cache *cache, struct fd_bo *bo)
       simple_mtx_lock(&cache->lock);
       list_addtail(&bo->node, &bucket->list);
       bucket->count++;
+      fd_dbg_cache_put++;
       simple_mtx_unlock(&cache->lock);
 
       fd_alloc_log(bo, FD_ALLOC_ACTIVE, FD_ALLOC_CACHE);

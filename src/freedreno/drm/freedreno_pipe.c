@@ -302,3 +302,11 @@ fd_fence_wait(struct fd_fence *f)
    MESA_TRACE_FUNC();
    return fd_pipe_wait(f->pipe, f);
 }
+
+/* qcdxkm debug: userspace fence written by the GPU into the control BO vs the last emitted fence */
+void
+fd_pipe_debug_fences(struct fd_pipe *pipe, uint32_t *ctl, uint32_t *last)
+{
+   *ctl = pipe->control ? pipe->control->fence : 0xffffffff;
+   *last = pipe->last_fence;
+}

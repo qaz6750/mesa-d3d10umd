@@ -238,7 +238,7 @@ struct fd_bo {
       NO_CACHE = 0,
       BO_CACHE = 1,
       RING_CACHE = 2,
-   } bo_reuse : 2;
+   } bo_reuse : 3;   /* qcdxkm: was 2 - MSVC/clang-cl enum bitfields are signed, RING_CACHE (2) read back as -2 */
 
    /* Most recent index in submit's bo table, used to optimize the common
     * case where a bo is used many times in the same submit.

@@ -783,6 +783,14 @@ if with_gallium_st_nine
   endif
 endif
 
+# qcdxkm: freedreno on Windows talks to the WDDM KMD through a libdrm shim (src/freedreno/drm/wddm)
+if with_gallium_freedreno and host_machine.system() == 'windows'
+  pre_args += ['-I' + (meson.current_source_dir() / 'src' / 'freedreno' / 'drm' / 'wddm' / 'include'),
+               '-I' + (meson.current_source_dir() / 'src' / 'freedreno' / 'drm' / 'wddm'),
+               '-FI' + (meson.current_source_dir() / 'src' / 'freedreno' / 'drm' / 'wddm' / 'fd_wddm_compat.h'),
+               '-DFD_WDDM']
+endif
+
 with_gallium_st_d3d10umd =  get_option('gallium-d3d10umd')
 if with_gallium_st_d3d10umd
   if not [
