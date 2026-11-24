@@ -402,11 +402,9 @@ __OUT_IB5(struct fd_ringbuffer *ring, struct fd_ringbuffer *target)
  */
 #define HW_QUERY_BASE_REG REG_AXXX_CP_SCRATCH_REG4
 
-#if MESA_DEBUG
+/* qcdxkm bring-up: markers (WFI + CP_SCRATCH write around draws/passes) always on, the KMD
+ * hang dump reads CP_SCRATCH_REG5..7 to locate a hang */
 #define __EMIT_MARKER 1
-#else
-#define __EMIT_MARKER 0
-#endif
 
 static inline void
 emit_marker(struct fd_ringbuffer *ring, int scratch_idx)

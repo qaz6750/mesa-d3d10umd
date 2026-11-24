@@ -69,6 +69,7 @@ struct ttn_compile {
 
    unsigned num_samp_types;
    nir_alu_type *samp_types;
+   unsigned *sview_targets;   /* qcdxkm: TGSI_TEXTURE_* of each SVIEW declaration (SM4 sample ops) */
 
    nir_def *addr_reg;
 
@@ -264,6 +265,7 @@ ttn_emit_declaration(struct ttn_compile *c)
 
       for (i = 0; i < array_size; i++) {
          c->samp_types[decl->Range.First + i] = type;
+         c->sview_targets[decl->Range.First + i] = sview->Resource;
       }
    } else {
       bool is_array = (array_size > 1);
@@ -587,7 +589,11 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
 
       switch (c->scan->system_value_semantic_name[index]) {
       case TGSI_SEMANTIC_VERTEXID_NOBASE:
-         load = nir_load_vertex_id_zero_base(b);
+         /* qcdxkm: freedreno only feeds SYSTEM_VALUE_VERTEX_ID to the VS (VFD_CNTL_1
+          * REGID4VTX); vertex_id_zero_base stayed r63 and every vertex read garbage. For
+          * Draw(count, start) load_vertex_id is exactly D3D's SV_VertexID (start + i); for
+          * DrawIndexed it is index + BaseVertexLocation (D3D: index) - known limitation. */
+         load = nir_load_vertex_id(b);
          break;
       case TGSI_SEMANTIC_VERTEXID:
          load = nir_load_vertex_id(b);
@@ -808,6 +814,7 @@ ttn_get_src(struct ttn_compile *c, struct tgsi_full_src_register *tgsi_fsrc,
    if (tgsi_src->File == TGSI_FILE_NULL) {
       return nir_imm_float(b, 0.0);
    } else if (tgsi_src->File == TGSI_FILE_SAMPLER ||
+              tgsi_src->File == TGSI_FILE_SAMPLER_VIEW ||   /* qcdxkm: SM4 sample ops */
               tgsi_src->File == TGSI_FILE_IMAGE ||
               tgsi_src->File == TGSI_FILE_BUFFER) {
       /* Only the index of the resource gets used in texturing, and it will
@@ -963,9 +970,23 @@ ttn_barrier(nir_builder *b)
    nir_barrier(b, .execution_scope = SCOPE_WORKGROUP);
 }
 
+/* qcdxkm: switches from C:\ProgramData\qcdx\umd.env (read by the UMD into the environment) */
+static bool
+ttn_topaz_flag(const char *name)
+{
+   const char *v = getenv(name);
+   return v && v[0] == '1';
+}
+
 static void
 ttn_kill(nir_builder *b)
 {
+   if (ttn_topaz_flag("QCDX_DEMOTE")) {
+      /* D3D discard keeps the pixel as a helper lane (derivatives of its quad stay valid) */
+      nir_demote(b);
+      b->shader->info.fs.uses_discard = true;
+      return;
+   }
    nir_discard(b);
    b->shader->info.fs.uses_discard = true;
 }
@@ -978,6 +999,11 @@ ttn_kill_if(nir_builder *b, nir_def **src)
    nir_def *cmp = nir_bany(b, nir_flt_imm(b, src[0], 0.0));
    b->exact = false;
 
+   if (ttn_topaz_flag("QCDX_DEMOTE")) {
+      nir_demote_if(b, cmp);
+      b->shader->info.fs.uses_discard = true;
+      return;
+   }
    nir_discard_if(b, cmp);
    b->shader->info.fs.uses_discard = true;
 }
@@ -1420,6 +1446,168 @@ ttn_tex(struct ttn_compile *c, nir_def **src)
                 nir_tex_instr_dest_size(instr), 32);
    nir_builder_instr_insert(b, &instr->instr);
    return nir_pad_vector_imm_int(b, &instr->def, 0, 4);
+}
+
+/* qcdxkm: the SM4 sample opcodes d3d10umd emits (SAMPLE, _B, _L, _C, _C_LZ, _D, _I): explicit SVIEW
+ * (src[1]) and SAMPLER (src[2]) registers, texture target from the SVIEW declaration. The tex
+ * instruction carries texture_index/sampler_index directly (no derefs). */
+static nir_def *
+ttn_sample(struct ttn_compile *c, nir_def **src)
+{
+   nir_builder *b = &c->build;
+   struct tgsi_full_instruction *ti = &c->token->FullInstruction;
+   unsigned opc = ti->Instruction.Opcode;
+   unsigned sview = ti->Src[1].Register.Index;
+   unsigned samp = opc == TGSI_OPCODE_SAMPLE_I ? 0 : ti->Src[2].Register.Index;
+   unsigned target = sview < c->num_samp_types ? c->sview_targets[sview] : TGSI_TEXTURE_2D;
+   nir_alu_type stype = sview < c->num_samp_types ? c->samp_types[sview] : nir_type_float32;
+   nir_tex_instr *instr;
+   unsigned n = 0, num_srcs = 1, i;
+   nir_texop op;
+   bool shadow = false;
+
+   switch (opc) {
+   case TGSI_OPCODE_SAMPLE:      op = nir_texop_tex; break;
+   case TGSI_OPCODE_SAMPLE_B:    op = nir_texop_txb; num_srcs++; break;
+   case TGSI_OPCODE_SAMPLE_L:    op = nir_texop_txl; num_srcs++; break;
+   case TGSI_OPCODE_SAMPLE_C:    op = nir_texop_tex; num_srcs++; shadow = true; break;
+   case TGSI_OPCODE_SAMPLE_C_LZ: op = nir_texop_txl; num_srcs += 2; shadow = true; break;
+   case TGSI_OPCODE_SAMPLE_D:    op = nir_texop_txd; num_srcs += 2; break;
+   case TGSI_OPCODE_SAMPLE_I:
+   default:
+      op = target == TGSI_TEXTURE_2D_MSAA || target == TGSI_TEXTURE_2D_ARRAY_MSAA ? nir_texop_txf_ms : nir_texop_txf;
+      if (target != TGSI_TEXTURE_BUFFER)
+         num_srcs++;                           /* lod / sample index */
+      break;
+   }
+   if (b->shader->info.stage != MESA_SHADER_FRAGMENT && op == nir_texop_tex) {
+      op = nir_texop_txl;                      /* no implicit derivatives outside the FS */
+      num_srcs++;
+   }
+   num_srcs += ti->Texture.NumOffsets;
+
+   instr = nir_tex_instr_create(b->shader, num_srcs);
+   instr->op = op;
+   get_texture_info(target, &instr->sampler_dim, &instr->is_shadow, &instr->is_array);
+   instr->is_shadow = shadow;
+   instr->coord_components = glsl_get_sampler_dim_coordinate_components(instr->sampler_dim);
+   if (instr->is_array)
+      instr->coord_components++;
+   instr->texture_index = sview;
+   instr->sampler_index = samp;
+   instr->dest_type = stype;
+
+   /* declare the texture for shader_info (textures_used, num_textures) */
+   get_sampler_var(c, sview, instr->sampler_dim, false, instr->is_array, base_type_for_alu_type(stype), op);
+   if (op != nir_texop_txf && op != nir_texop_txf_ms) {
+      BITSET_SET(b->shader->info.samplers_used, samp);
+      c->num_samplers = MAX2(c->num_samplers, samp + 1);
+   }
+
+   instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_coord, nir_trim_vector(b, src[0], instr->coord_components));
+   switch (opc) {
+   case TGSI_OPCODE_SAMPLE_B:
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_bias, ttn_channel(b, src[3], X));
+      break;
+   case TGSI_OPCODE_SAMPLE_L:
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, ttn_channel(b, src[3], X));
+      break;
+   case TGSI_OPCODE_SAMPLE_C:
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_comparator, ttn_channel(b, src[3], X));
+      break;
+   case TGSI_OPCODE_SAMPLE_C_LZ:
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_comparator, ttn_channel(b, src[3], X));
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(b, 0.0));
+      break;
+   case TGSI_OPCODE_SAMPLE_D:
+      instr->src[n] = nir_tex_src_for_ssa(nir_tex_src_ddx, nir_trim_vector(b, src[3], instr->coord_components - instr->is_array));
+      n++;
+      instr->src[n] = nir_tex_src_for_ssa(nir_tex_src_ddy, nir_trim_vector(b, src[4], instr->coord_components - instr->is_array));
+      n++;
+      break;
+   case TGSI_OPCODE_SAMPLE_I:
+      if (target != TGSI_TEXTURE_BUFFER) {
+         if (op == nir_texop_txf_ms)
+            instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_ms_index, ttn_channel(b, src[0], W));
+         else
+            instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, ttn_channel(b, src[0], W));
+      }
+      break;
+   default:
+      break;
+   }
+   if (n < num_srcs - ti->Texture.NumOffsets && (op == nir_texop_txl) &&
+       opc != TGSI_OPCODE_SAMPLE_L && opc != TGSI_OPCODE_SAMPLE_C_LZ) {
+      instr->src[n++] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(b, 0.0));
+   }
+   for (i = 0; i < ti->Texture.NumOffsets; i++) {
+      struct tgsi_texture_offset *to = &ti->TexOffsets[i];
+      nir_alu_src asrc;
+      memset(&asrc, 0, sizeof(asrc));
+      asrc.src = ttn_src_for_file_and_index(c, to->File, to->Index, NULL, NULL, NULL, true);
+      asrc.swizzle[0] = to->SwizzleX;
+      asrc.swizzle[1] = to->SwizzleY;
+      asrc.swizzle[2] = to->SwizzleZ;
+      asrc.swizzle[3] = TGSI_SWIZZLE_W;
+      instr->src[n] = nir_tex_src_for_ssa(nir_tex_src_offset, nir_mov_alu(b, asrc, nir_tex_instr_src_size(instr, n)));
+      n++;
+   }
+   assert(n == num_srcs);
+   instr->num_srcs = n;
+
+   nir_def_init(&instr->instr, &instr->def, nir_tex_instr_dest_size(instr), 32);
+   nir_builder_instr_insert(b, &instr->instr);
+   nir_def *res = nir_pad_vector_imm_int(b, &instr->def, 0, 4);
+   if (ttn_topaz_flag("QCDX_SVSWZ")) {
+      /* the SM4 resource swizzle (t0.wxyz, ...) applies to the sampled value */
+      unsigned swz[4] = { ti->Src[1].Register.SwizzleX, ti->Src[1].Register.SwizzleY,
+                          ti->Src[1].Register.SwizzleZ, ti->Src[1].Register.SwizzleW };
+      if (swz[0] != 0 || swz[1] != 1 || swz[2] != 2 || swz[3] != 3)
+         res = nir_swizzle(b, res, swz, 4);
+   }
+   return res;
+}
+
+/* qcdxkm: SVIEWINFO (SM4 resinfo / GetDimensions): dst.xyz = size at lod src[0].x, dst.w = levels. */
+static nir_def *
+ttn_sviewinfo(struct ttn_compile *c, nir_def **src)
+{
+   nir_builder *b = &c->build;
+   struct tgsi_full_instruction *ti = &c->token->FullInstruction;
+   unsigned sview = ti->Src[1].Register.Index;
+   unsigned target = sview < c->num_samp_types ? c->sview_targets[sview] : TGSI_TEXTURE_2D;
+   nir_alu_type stype = sview < c->num_samp_types ? c->samp_types[sview] : nir_type_float32;
+   nir_tex_instr *txs, *qlv;
+
+   txs = nir_tex_instr_create(b->shader, 1);
+   txs->op = nir_texop_txs;
+   txs->dest_type = nir_type_uint32;
+   get_texture_info(target, &txs->sampler_dim, &txs->is_shadow, &txs->is_array);
+   txs->texture_index = sview;
+   get_sampler_var(c, sview, txs->sampler_dim, false, txs->is_array, base_type_for_alu_type(stype), nir_texop_txs);
+
+   qlv = nir_tex_instr_create(b->shader, 0);
+   qlv->op = nir_texop_query_levels;
+   qlv->dest_type = nir_type_uint32;
+   qlv->sampler_dim = txs->sampler_dim;
+   qlv->is_array = txs->is_array;
+   qlv->texture_index = sview;
+
+   if (target != TGSI_TEXTURE_BUFFER && target != TGSI_TEXTURE_2D_MSAA &&
+       target != TGSI_TEXTURE_2D_ARRAY_MSAA) {
+      txs->num_srcs = 1;
+      /* the SM4 operand is an integer already */
+      txs->src[0] = nir_tex_src_for_ssa(nir_tex_src_lod, ttn_channel(b, src[0], X));
+   } else {
+      txs->num_srcs = 0;
+   }
+
+   nir_def_init(&txs->instr, &txs->def, nir_tex_instr_dest_size(txs), 32);
+   nir_builder_instr_insert(b, &txs->instr);
+   nir_def_init(&qlv->instr, &qlv->def, 1, 32);
+   nir_builder_instr_insert(b, &qlv->instr);
+
+   return nir_vector_insert_imm(b, nir_pad_vector_imm_int(b, &txs->def, 0, 4), &qlv->def, 3);
 }
 
 /* TGSI_OPCODE_TXQ is actually two distinct operations:
@@ -1974,8 +2162,40 @@ ttn_emit_instruction(struct ttn_compile *c)
       dst = ttn_tex(c, src);
       break;
 
+   case TGSI_OPCODE_SAMPLE:
+   case TGSI_OPCODE_SAMPLE_B:
+   case TGSI_OPCODE_SAMPLE_L:
+   case TGSI_OPCODE_SAMPLE_C:
+   case TGSI_OPCODE_SAMPLE_C_LZ:
+   case TGSI_OPCODE_SAMPLE_D:
+   case TGSI_OPCODE_SAMPLE_I:
+      dst = ttn_sample(c, src);   /* qcdxkm */
+      break;
+
    case TGSI_OPCODE_TXQ:
       dst = ttn_txq(c, src);
+      break;
+
+   case TGSI_OPCODE_DDX:
+   case TGSI_OPCODE_DDY: {
+      /* qcdxkm experiment QCDX_DERIV: 1 = fine derivatives (dsxpp/dsypp), 2 = coarse (explicit) */
+      const char *dv = getenv("QCDX_DERIV");
+      nir_op op = tgsi_op == TGSI_OPCODE_DDX ? nir_op_fddx : nir_op_fddy;
+      if (dv && dv[0] == '1')
+         op = tgsi_op == TGSI_OPCODE_DDX ? nir_op_fddx_fine : nir_op_fddy_fine;
+      else if (dv && dv[0] == '2')
+         op = tgsi_op == TGSI_OPCODE_DDX ? nir_op_fddx_coarse : nir_op_fddy_coarse;
+      dst = ttn_alu(b, op, dst_bitsize, src);
+      break;
+   }
+
+   case TGSI_OPCODE_SVIEWINFO:
+      if (ttn_topaz_flag("QCDX_SVINFO")) {
+         dst = ttn_sviewinfo(c, src);
+         break;
+      }
+      dst = nir_imm_vec4(b, 0.0, 0.0, 0.0, 0.0);
+      fprintf(stderr, "unknown TGSI opcode: SVIEWINFO (result 0)\n");
       break;
 
    case TGSI_OPCODE_LOAD:
@@ -2022,13 +2242,22 @@ ttn_emit_instruction(struct ttn_compile *c)
       ttn_barrier(b);
       break;
 
+   case TGSI_OPCODE_RET:
+      /* qcdxkm: d3d10umd ends every DXBC main with RET. Outputs are stored after the last
+       * instruction (ttn_add_output_stores), so a real return would skip them: a top-level RET is
+       * a no-op. A nested (early) RET is not supported yet and is ignored with a warning. */
+      if (nir_cursor_current_block(b->cursor)->cf_node.parent != &b->impl->cf_node)
+         fprintf(stderr, "tgsi_to_nir: nested RET ignored\n");
+      break;
+
    default:
       if (op_trans[tgsi_op] != 0 || tgsi_op == TGSI_OPCODE_MOV) {
          dst = ttn_alu(b, op_trans[tgsi_op], dst_bitsize, src);
       } else {
-         fprintf(stderr, "unknown TGSI opcode: %s\n",
+         /* qcdxkm: a wrong value beats killing DWM; the opcode shows up in the debug log */
+         fprintf(stderr, "unknown TGSI opcode: %s (result 0)\n",
                  tgsi_get_opcode_name(tgsi_op));
-         abort();
+         dst = nir_imm_vec4(b, 0.0, 0.0, 0.0, 0.0);
       }
       break;
    }
@@ -2352,6 +2581,7 @@ ttn_compile_init(const void *tgsi_tokens,
 
    c->num_samp_types = scan.file_max[TGSI_FILE_SAMPLER_VIEW] + 1;
    c->samp_types = rzalloc_array(c, nir_alu_type, c->num_samp_types);
+   c->sview_targets = rzalloc_array(c, unsigned, c->num_samp_types);
 
    ttn_parse_tgsi(c, tgsi_tokens);
    ttn_add_output_stores(c);

@@ -1799,3 +1799,59 @@ fd_resource_context_init(struct pipe_context *pctx)
    pctx->invalidate_resource = fd_invalidate_resource;
    pctx->get_sample_position = u_default_get_sample_position;
 }
+
+/* qcdxkm (d3d10umd on Windows): DXGI RotateResourceIdentities. The swapchain buffers keep their
+ * pipe_resource objects (render target / shader resource views point at them) and only their storage
+ * rotates: prscs[i] takes the storage of prscs[i + 1], the last one takes prscs[0]'s. Rotating the
+ * pipe_resource pointers instead (as d3d10umd did) left DWM rendering into a buffer other than the one
+ * it presented: stale animation frames stayed on screen. Same steps as the shadow-buffer swap above;
+ * the caller flushed the context. */
+void
+fd_resource_rotate_storage(struct pipe_context *pctx, struct pipe_resource **prscs, unsigned n)
+{
+   struct fd_context *ctx = fd_context(pctx);
+   struct fd_resource *first;
+   struct fd_bo *bo0;
+   struct fdl_layout layout0;
+   bool valid0;
+
+   if (n < 2)
+      return;
+   for (unsigned i = 0; i < n; i++) {
+      fd_bc_invalidate_resource(fd_resource(prscs[i]), false);
+      rebind_resource(fd_resource(prscs[i]));
+   }
+
+   fd_screen_lock(ctx->screen);
+   first = fd_resource(prscs[0]);
+   bo0 = first->bo;
+   valid0 = first->valid;
+   layout0 = first->layout;
+   for (unsigned i = 0; i + 1 < n; i++) {
+      struct fd_resource *a = fd_resource(prscs[i]), *b = fd_resource(prscs[i + 1]);
+      a->bo = b->bo;
+      a->valid = b->valid;
+      a->layout = b->layout;
+      a->seqno = seqno_next_u16(&ctx->screen->rsc_seqno);
+   }
+   {
+      struct fd_resource *last = fd_resource(prscs[n - 1]);
+      last->bo = bo0;
+      last->valid = valid0;
+      last->layout = layout0;
+      last->seqno = seqno_next_u16(&ctx->screen->rsc_seqno);
+   }
+   fd_screen_unlock(ctx->screen);
+}
+
+/* qcdxkm debug (d3d10umd QCDX_MAPLOG): BO pointer and batch-tracking state of a resource */
+void
+fd_resource_debug_state(struct pipe_resource *prsc, void **bo, unsigned *batch_mask, int *write_batch,
+                        int *busy)
+{
+   struct fd_resource *rsc = fd_resource(prsc);
+   *bo = rsc->bo;
+   *batch_mask = rsc->track ? rsc->track->batch_mask : 0;
+   *write_batch = rsc->track && rsc->track->write_batch;
+   *busy = fd_bo_cpu_prep(rsc->bo, NULL, FD_BO_PREP_WRITE | FD_BO_PREP_NOSYNC) != 0;
+}

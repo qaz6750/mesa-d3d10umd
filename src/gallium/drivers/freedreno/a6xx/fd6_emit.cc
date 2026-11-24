@@ -99,7 +99,7 @@ static enum a6xx_ztest_mode
 compute_ztest_mode(struct fd6_emit *emit, bool lrz_valid) assert_dt
 {
    if (emit->prog->lrz_mask.z_mode != A6XX_INVALID_ZTEST)
-      return emit->prog->lrz_mask.z_mode;
+      return (enum a6xx_ztest_mode)emit->prog->lrz_mask.z_mode;
 
    struct fd_context *ctx = emit->ctx;
    struct pipe_framebuffer_state *pfb = &ctx->batch->framebuffer;
@@ -225,7 +225,7 @@ compute_lrz_state(struct fd6_emit *emit) assert_dt
     * to the point where the overly-conservative test is incorrect.
     */
    if (zsa->base.depth_writemask) {
-      rsc->lrz_direction = lrz.direction;
+      rsc->lrz_direction = (enum fd_lrz_direction)lrz.direction;
    }
 
    return lrz;
@@ -280,9 +280,9 @@ build_lrz(struct fd6_emit *emit) assert_dt
    }
    OUT_REG(ring, A6XX_RB_LRZ_CNTL(.enable = lrz.enable, ));
 
-   OUT_REG(ring, A6XX_RB_DEPTH_PLANE_CNTL(.z_mode = lrz.z_mode, ));
+   OUT_REG(ring, A6XX_RB_DEPTH_PLANE_CNTL(.z_mode = (enum a6xx_ztest_mode)lrz.z_mode, ));
 
-   OUT_REG(ring, A6XX_GRAS_SU_DEPTH_PLANE_CNTL(.z_mode = lrz.z_mode, ));
+   OUT_REG(ring, A6XX_GRAS_SU_DEPTH_PLANE_CNTL(.z_mode = (enum a6xx_ztest_mode)lrz.z_mode, ));
 
    return ring;
 }

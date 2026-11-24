@@ -32,8 +32,15 @@
 #include <stdio.h>
 
 /* clang-format off */
+#ifdef FD_WDDM
+/* COFF weak externals with different defaults per object conflict at link time (LNK1227);
+   disasm-a3xx.c always defines it, so a plain declaration is enough on Windows. */
+void ir3_assert_handler(const char *expr, const char *file, int line,
+                        const char *func) __attribute__((__noreturn__));
+#else
 void ir3_assert_handler(const char *expr, const char *file, int line,
                         const char *func) __attribute__((weak)) __attribute__((__noreturn__));
+#endif
 /* clang-format on */
 
 /* A wrapper for assert() that allows overriding handling of a failed

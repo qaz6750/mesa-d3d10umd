@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <stdlib.h>
 /*
  * Copyright (C) 2016 Rob Clark <robclark@freedesktop.org>
  * Copyright © 2018 Google, Inc.
@@ -173,21 +175,37 @@ fd6_emit_shader(struct fd_context *ctx, struct fd_ringbuffer *ring,
                .earlypreamble = so->early_preamble,
       ));
       break;
-   case MESA_SHADER_FRAGMENT:
+   case MESA_SHADER_FRAGMENT: {
+      /* qcdxkm (default on, QCDX_FULLQUAD=0 disables): always run full 2x2 quads (helper lanes). For shaders
+       * translated from D3D TGSI ir3 never set need_full_quad/need_pixlod (NIR info.fs.needs_quad_helper_invocations
+       * stays false), so helper lanes never ran: derivatives / implicit LOD were garbage at every primitive edge,
+       * triangle seam and scissor edge (DWM's downscale shader: strokes, text fragments, diagonal seams). */
+      static int topaz_fq = -1;
+      if (topaz_fq < 0) {
+         const char *e = getenv("QCDX_FULLQUAD");
+         topaz_fq = !(e && e[0] == '0');
+      }
+      if (!so->need_full_quad || !so->need_pixlod) {
+         static unsigned topaz_fq_log;
+         if (!topaz_fq && topaz_fq_log++ < 40)
+            fprintf(stderr, "topaz: FS %p need_full_quad %d need_pixlod %d%s\n", (void *)so, so->need_full_quad,
+                    so->need_pixlod, topaz_fq ? " (forced on)" : "");
+      }
       OUT_REG(ring, A6XX_SP_FS_CTRL_REG0(
                .halfregfootprint = so->info.max_half_reg + 1,
                .fullregfootprint = so->info.max_reg + 1,
                .branchstack = ir3_shader_branchstack_hw(so),
                .threadsize = thrsz,
                .varying = so->total_in != 0,
-               .lodpixmask = so->need_full_quad,
+               .lodpixmask = so->need_full_quad || topaz_fq,
                /* unknown bit, seems unnecessary */
                .unk24 = true,
-               .pixlodenable = so->need_pixlod,
+               .pixlodenable = so->need_pixlod || topaz_fq,
                .earlypreamble = so->early_preamble,
                .mergedregs = so->mergedregs,
       ));
       break;
+   }
    case MESA_SHADER_COMPUTE:
       thrsz = ctx->screen->info->a6xx.supports_double_threadsize ? thrsz : THREAD128;
       OUT_REG(ring, A6XX_SP_CS_CTRL_REG0(

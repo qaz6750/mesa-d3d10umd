@@ -164,7 +164,7 @@ struct fd_resource {
     * fdl_layout
     */
    bool lrz_valid : 1;
-   enum fd_lrz_direction lrz_direction : 2;
+   enum fd_lrz_direction lrz_direction : 3; /* qcdxkm: signed enum bitfields on MSVC ABI */
    uint16_t lrz_width; // for lrz clear, does this differ from lrz_pitch?
    uint16_t lrz_height;
    uint16_t lrz_pitch;

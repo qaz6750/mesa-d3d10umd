@@ -50,6 +50,9 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
 {
    if (ir3_shader_debug & IR3_DBG_NOCACHE)
       return;
+#ifdef FD_WDDM
+   return;   /* no ELF build-id on Windows: no on-disk shader cache */
+#else
 
    const char *renderer = fd_dev_name(compiler->dev_id);
    const struct build_id_note *note =
@@ -66,6 +69,7 @@ ir3_disk_cache_init(struct ir3_compiler *compiler)
    if (compiler->options.robust_buffer_access2)
       driver_flags |= IR3_DBG_ROBUST_UBO_ACCESS;
    compiler->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+#endif
 }
 
 void

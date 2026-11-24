@@ -41,14 +41,17 @@
 struct fd6_lrz_state {
    union {
       struct {
-         bool enable : 1;
-         bool write : 1;
-         bool test : 1;
-         bool z_bounds_enable : 1;
-         enum fd_lrz_direction direction : 2;
+         /* qcdxkm: uint32_t, not bool/enum: under the MSVC ABI enum bitfields are signed
+          * (z_mode 3 read back as -1 -> 0xffffffff in RB/GRAS_SU_DEPTH_PLANE_CNTL hung RB) and
+          * bitfields of different types are not packed together (val would not cover them). */
+         uint32_t enable : 1;
+         uint32_t write : 1;
+         uint32_t test : 1;
+         uint32_t z_bounds_enable : 1;
+         uint32_t direction : 2;   /* enum fd_lrz_direction */
 
          /* this comes from the fs program state, rather than zsa: */
-         enum a6xx_ztest_mode z_mode : 2;
+         uint32_t z_mode : 2;      /* enum a6xx_ztest_mode */
       };
       uint32_t val : 8;
    };

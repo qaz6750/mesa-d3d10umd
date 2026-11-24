@@ -68,7 +68,7 @@ prim_count(const struct pipe_draw_info *info,
 {
    /* MESA_PRIM_COUNT used internally for RECTLIST blits on 3d pipe: */
    unsigned vtx_per_prim =
-      (info->mode == MESA_PRIM_COUNT) ? 2 : mesa_vertices_per_prim(info->mode);
+      (info->mode == MESA_PRIM_COUNT) ? 2 : mesa_vertices_per_prim((enum mesa_prim)info->mode);
    return MAX2(1, (draw->count * info->instance_count) / vtx_per_prim);
 }
 

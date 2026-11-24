@@ -765,3 +765,11 @@ fd_context_init_tc(struct pipe_context *pctx, unsigned flags)
 
    return tc;
 }
+
+/* qcdxkm debug (d3d10umd QCDX_TIMING) */
+void fd_pipe_debug_fences(struct fd_pipe *pipe, uint32_t *ctl, uint32_t *last);
+void
+fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last)
+{
+   fd_pipe_debug_fences(fd_context(pctx)->pipe, ctl, last);
+}
