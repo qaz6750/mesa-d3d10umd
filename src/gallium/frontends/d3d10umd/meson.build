@@ -24,7 +24,8 @@ libd3d10umd = static_library(
     'ShaderParse.c',
     'ShaderTGSI.c',
     'D3DKMT.cpp',
-    'gdikmt_d3dddi.cpp'
+    'gdikmt_d3dddi.cpp',
+    'topaz_wddm.cpp'
   ),
   c_args : _c_args_d3d10umd,
   cpp_args : _c_args_d3d10umd,

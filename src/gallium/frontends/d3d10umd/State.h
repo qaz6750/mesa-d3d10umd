@@ -93,6 +93,11 @@ struct Device
    void *empty_fs;
    void *empty_vs;
 
+   struct DepthStencilState *dss;   /* qcdxkm: current D3D depth-stencil state */
+   struct gdikmt_context *topazCtx; /* qcdxkm C2: WDDM context for pfnPresentCb */
+   struct TopazScFix *topazScFix;   /* qcdxkm: per-device scissor strip state (Rasterizer.cpp) */
+   bool topazRsScissor;             /* qcdxkm: bound rasterizer state has ScissorEnable */
+
    enum mesa_prim primitive;
 
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
@@ -149,11 +154,25 @@ CastPipeDevice(DXGI_DDI_HDEVICE hDevice)
 }
 
 
+extern "C" void QcdxWddmLogf(const char *fmt, ...);
+extern "C" void TopazAfterDraw(void *device);
+extern "C" const void *g_topazPsTokens;   /* Rasterizer.cpp: PS bound (TGSI tokens) */
+extern "C" void TopazProbePresent(void);
+extern "C" void TopazStripsRestore(void *device);
+extern "C" void TopazScFixDestroy(void *device);
+extern "C" void TopazStripsResave(void *device);
+extern "C" void TopazProbeAfterCopy(void *device);   /* Rasterizer.cpp */
+extern "C" void TopazMaybeDump(void *pipe, void *presented);   /* Rasterizer.cpp */
+extern "C" void TopazLogDraw(const char *kind, unsigned count, void *device, void *rt, unsigned rtw, unsigned rth);   /* Rasterizer.cpp, QCDX_DRAWLOG=1 */   /* qcdxkm: topaz_wddm.cpp */
+
+#define SetError(hDevice, hr) SetErrorAt(hDevice, hr, __func__, __LINE__)
+
 static inline void
-SetError(D3D10DDI_HDEVICE hDevice, HRESULT hr)
+SetErrorAt(D3D10DDI_HDEVICE hDevice, HRESULT hr, const char *func, int line)
 {
    if (FAILED(hr)) {
       Device *pDevice = CastDevice(hDevice);
+      QcdxWddmLogf("SetError 0x%08lx in %s:%d\n", (unsigned long)hr, func, line);
       pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
    }
 }
@@ -168,6 +187,7 @@ struct Resource
    struct pipe_resource *resource;
    struct pipe_transfer **transfers;
    struct pipe_stream_output_target *so_target;
+   D3DKMT_HANDLE hAllocation;       /* qcdxkm C2: WDDM allocation naming the BO (0 = none) */
 };
 
 
@@ -281,6 +301,7 @@ CastPipeBlendState(D3D10DDI_HBLENDSTATE hBlendState)
 struct DepthStencilState
 {
    void *handle;
+   void *handle_nozs;   /* qcdxkm: same state with depth/stencil off, bound while no DSV is set */
 };
 
 
@@ -302,6 +323,7 @@ CastPipeDepthStencilState(D3D10DDI_HDEPTHSTENCILSTATE hDepthStencilState)
 struct RasterizerState
 {
    void *handle;
+   bool scissor;   /* qcdxkm: for QCDX_DRAWLOG */
 };
 
 
@@ -399,6 +421,8 @@ struct Query
    struct pipe_query *handle;
    INT SeqNo;
    UINT GetDataCount;
+   struct pipe_fence_handle *fence;   /* qcdxkm: EVENT queries (freedreno has no PIPE_QUERY_GPU_FINISHED) */
+   bool eventFenceMissing;
 
    D3D10_DDI_QUERY_DATA_PIPELINE_STATISTICS Statistics;
 };
@@ -418,3 +442,14 @@ CastPipeQuery(D3D10DDI_HQUERY hQuery)
    return pQuery ? pQuery->handle : NULL;
 }
 
+
+
+/* qcdxkm step C2 (topaz_wddm.cpp) */
+bool QcdxWddmWanted(const D3D10DDIARG_CREATERESOURCE *pCreate);
+void QcdxWddmTemplate(struct pipe_resource *templat);
+HRESULT QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG_CREATERESOURCE *pCreate, bool noScanout);
+bool QcdxWddmNoFlip(void);
+void QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource);
+struct pipe_resource *QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, D3DKMT_HANDLE *phAllocation);
+HRESULT QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext);
+bool QcdxWddmEnabled(void);

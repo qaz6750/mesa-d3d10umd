@@ -44,6 +44,8 @@
 
 #include "Debug.h"
 
+extern "C" void fd_wddm_detach(void *ctx);   /* qcdxkm: freedreno/drm/wddm/fd_wddm.c */
+
 #include "util/u_sampler.h"
 
 #include "gdikmt/gdikmt.h"
@@ -155,6 +157,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
 
    pDevice->empty_vs = CreateEmptyShader(pDevice, PIPE_SHADER_VERTEX);
+   pDevice->velems_changed = true;
+   pDevice->dss = NULL;              /* qcdxkm: current depth-stencil state */   /* qcdxkm: bind (empty) vertex elements before the first draw */
    pDevice->empty_fs = CreateEmptyShader(pDevice, PIPE_SHADER_FRAGMENT);
 
    pipe->bind_vs_state(pipe, pDevice->empty_vs);
@@ -345,6 +349,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
       pipe_so_target_reference(&pDevice->draw_so_target, NULL);
    }
 
+   TopazScFixDestroy(pDevice);   /* qcdxkm: per-device scissor strip scratch texture */
    pipe->bind_fs_state(pipe, NULL);
    pipe->bind_vs_state(pipe, NULL);
    cso_destroy_context(pDevice->cso);
@@ -368,14 +373,16 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);
    pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, false, sampler_views);
+                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
    pipe->set_sampler_views(pipe, PIPE_SHADER_VERTEX, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, false, sampler_views);
+                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
    pipe->set_sampler_views(pipe, PIPE_SHADER_GEOMETRY, 0,
-                           PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, false, sampler_views);
+                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
 
    pipe->destroy(pipe);
    pDevice->screen->destroy(pDevice->screen);
+   fd_wddm_detach(&pDevice->device.base);   /* qcdxkm: its escape context dies with the device */
+   pDevice->device.base.destroy(&pDevice->device.base);
 
    mtx_destroy(&pDevice->CreateResourceMtx);
 }

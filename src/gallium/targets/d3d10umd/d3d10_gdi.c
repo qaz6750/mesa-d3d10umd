@@ -34,6 +34,45 @@
 #include "softpipe/sp_public.h"
 #include "sw/gdi/gdi_sw_winsys.h"
 #include "virgl/gdi/virgl_gdi_public.h"
+#ifdef GALLIUM_FREEDRENO
+#include "xf86drm.h"
+#include "util/xmlconfig.h"
+#include "util/driconf.h"
+#include "pipe/p_screen.h"
+#include "renderonly/renderonly.h"
+#include "compiler/glsl_types.h"
+
+struct pipe_screen *fd_screen_create(int fd, const struct pipe_screen_config *config, struct renderonly *ro);
+
+/* freedreno reads driconf options in fd_screen_create(): give it its defaults */
+static const driOptionDescription fd_driconf[] = {
+#include "freedreno/driinfo_freedreno.h"
+};
+static driOptionCache fd_options;
+static struct pipe_screen_config fd_config;
+
+/* renderonly.c needs libdrm and is not built on Windows; freedreno only calls these when
+ * screen->ro != NULL, and we always pass NULL. */
+void
+renderonly_scanout_destroy(struct renderonly_scanout *scanout, struct renderonly *ro)
+{
+}
+
+struct renderonly_scanout *
+renderonly_create_gpu_import_for_resource(struct pipe_resource *rsc, struct renderonly *ro,
+                                          struct winsys_handle *out_handle)
+{
+   return NULL;
+}
+
+/* qcdxkm: DRM ioctls of freedreno travel as escapes through the D3D10 device callbacks */
+static int
+d3d10_fd_escape(void *ctx, void *data, unsigned size)
+{
+   struct gdikmt_device *device = (struct gdikmt_device *)ctx;
+   return device->escape(device, data, size) >= 0 ? 0 : -1;
+}
+#endif
 
 #include "winddk_compat.h"
 #include <d3dkmthk.h>
@@ -65,6 +104,23 @@ d3d10_create_screen(struct gdikmt_device* device)
 
 #ifdef GALLIUM_VIRGL
    return virgl_gdi_screen_create(device);
+#endif
+#ifdef GALLIUM_FREEDRENO
+   {
+      int fd;
+      fd = fd_wddm_open(d3d10_fd_escape, device);
+      if (fd < 0)
+         return NULL;
+      /* freedreno/NIR need the GLSL type cache; on Linux the GL frontend creates it */
+      glsl_type_singleton_init_or_ref();
+      if (!fd_config.options) {
+         driParseOptionInfo(&fd_options, fd_driconf, ARRAY_SIZE(fd_driconf));
+         fd_config.options = &fd_options;
+         fd_config.options_info = &fd_options;
+      }
+      screen = fd_screen_create(fd, &fd_config, NULL);
+      return screen ? debug_screen_wrap(screen) : NULL;
+   }
 #endif
 
 

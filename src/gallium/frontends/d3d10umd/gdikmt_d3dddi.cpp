@@ -7,6 +7,8 @@
 
 #include <d3dukmdt.h>
 #include "winddk_compat.h"
+#include "../../../freedreno/drm/wddm/qcdx_escape.h"
+#include "drm-uapi/msm_drm.h"
 
 static inline struct gdikmt_context_d3dddi *
 gdikmt_context_d3dddi(struct gdikmt_context *iws)
@@ -43,13 +45,54 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
 {
    struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
 
+   struct qcdx_escape *request = (struct qcdx_escape *)pPrivateDriverData;
+   const bool submit = PrivateDriverDataSize == sizeof(*request) &&
+      request->magic == QCDX_ESC_MAGIC &&
+      request->nr == DRM_COMMAND_BASE + DRM_MSM_GEM_SUBMIT &&
+      request->size == sizeof(struct drm_msm_gem_submit);
+   if (submit)
+      AcquireSRWLockExclusive(&device->qcdxSubmitLock);
    D3DDDICB_ESCAPE escape;
    memset(&escape, 0, sizeof(escape));
    escape.hDevice = device->hRTDevice;
    escape.pPrivateDriverData = pPrivateDriverData;
    escape.PrivateDriverDataSize = PrivateDriverDataSize;
 
-   return device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
+   NTSTATUS status = device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
+   if (submit && status == STATUS_SUCCESS && request->ret == 0) {
+      struct drm_msm_gem_submit *batch = (struct drm_msm_gem_submit *)request->data;
+      struct qcdx_render_command command = {
+         QCDX_ESC_MAGIC, QCDX_RENDER_SUBMIT, batch->fence, 0
+      };
+      if (!device->qcdxSubmitContext)
+         status = device->base.createContext(&device->base, &device->qcdxSubmitContext);
+      if (status == STATUS_SUCCESS) {
+         struct gdikmt_context *context = device->qcdxSubmitContext;
+         if (!context || !context->pCommandBuffer || context->CommandBufferSize < sizeof(command)) {
+            status = STATUS_NO_MEMORY;
+         } else {
+            struct gdikmt_render options = {};
+            memcpy(context->pCommandBuffer, &command, sizeof(command));
+            options.CommandLength = sizeof(command);
+            status = context->render(context, &options);
+         }
+      }
+      if (status != STATUS_SUCCESS) {
+         struct qcdx_escape cancel = {};
+         cancel.magic = QCDX_ESC_MAGIC;
+         cancel.nr = QCDX_NR_CANCEL_SUBMIT;
+         cancel.size = sizeof(command);
+         cancel.ret = -1;
+         memcpy(cancel.data, &command, sizeof(command));
+         escape.pPrivateDriverData = &cancel;
+         escape.PrivateDriverDataSize = sizeof(cancel);
+         device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
+         request->ret = -5;
+      }
+   }
+   if (submit)
+      ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+   return status;
 }
 
 NTSTATUS
@@ -288,11 +331,22 @@ gdikmt_d3dddi_setdisplaymode(struct gdikmt_device *_device,
    return res;
 };
 
-void gdikmt_d3dddi_destroy(struct gdikmt_device *_device){};
+void gdikmt_d3dddi_destroy(struct gdikmt_device *_device)
+{
+   struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
+   AcquireSRWLockExclusive(&device->qcdxSubmitLock);
+   if (device->qcdxSubmitContext) {
+      device->qcdxSubmitContext->destroy(device->qcdxSubmitContext);
+      device->qcdxSubmitContext = NULL;
+   }
+   ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+}
 
 void
 gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
 {
+   InitializeSRWLock(&device->qcdxSubmitLock);
+   device->qcdxSubmitContext = NULL;
    device->base.destroy = gdikmt_d3dddi_destroy;
    device->base.queryAdapterInfo = gdikmt_d3dddi_queryadapterinfo;
    device->base.escape = gdikmt_d3dddi_escape;

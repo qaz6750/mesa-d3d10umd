@@ -3,6 +3,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+extern "C" void QcdxWddmLog(const char *text);   /* qcdxkm, topaz_wddm.cpp */
+
 
 #if MESA_DEBUG
 
@@ -34,6 +36,7 @@ DebugPrintf(const char *format, ...)
     va_end(ap);
 
     OutputDebugStringA(buf);
+    QcdxWddmLog(buf);   /* qcdxkm */
 }
 
 

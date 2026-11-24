@@ -104,6 +104,12 @@ OpenAdapter10(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
    LOG_ENTRYPOINT();
 
+   /* qcdxkm: opt-in only while the driver is experimental. Our adapter is DXGI adapter 0, so
+    * without this explorer/DWM render on it and a GPU hang freezes the desktop. */
+   if (!QcdxWddmEnabled()) {
+      return E_FAIL;
+   }
+
    /*
     * This is checked here and not on the common code because MSDN docs
     * state that it should be ignored on OpenAdapter10_2.
@@ -222,6 +228,12 @@ EXTERN_C HRESULT APIENTRY
 OpenAdapter10_2(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
    LOG_ENTRYPOINT();
+
+   /* qcdxkm: opt-in only while the driver is experimental. Our adapter is DXGI adapter 0, so
+    * without this explorer/DWM render on it and a GPU hang freezes the desktop. */
+   if (!QcdxWddmEnabled()) {
+      return E_FAIL;
+   }
 
    HRESULT hr = OpenAdapterCommon(pOpenData);
 

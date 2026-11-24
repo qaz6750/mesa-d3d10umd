@@ -175,6 +175,12 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
       }
    }
 
+   if (getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1' && NumBuffers > 0) {
+      static unsigned topazVb;
+      if (++topazVb <= 40000)
+         QcdxWddmLogf("VB%u res %p off %u stride %u\n", StartBuffer, (void *)CastPipeResource(phBuffers[0]),
+                       pOffsets[0], pStrides[0]);
+   }
    /* Resubmit old and new vertex buffers.
     */
    pDevice->velems_changed = true;

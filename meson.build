@@ -796,8 +796,9 @@ if with_gallium_st_d3d10umd
   if not [
            with_gallium_swrast,
            with_gallium_virgl,
+           with_gallium_freedreno,
          ].contains(true)
-    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe or virgl.')
+    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe, virgl or freedreno.')
   endif
   if with_gallium_softpipe and with_gallium_virgl
     warning('The d3d10umd state trackes is built with both softpipe/llvmpipe and virgl, only virgl will be used.')

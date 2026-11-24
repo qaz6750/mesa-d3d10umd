@@ -31,7 +31,10 @@
  */
 
 
+#include <stdlib.h>
+#include <stdio.h>
 #include "Shader.h"
+extern "C" bool topaz_log_tgsi;   /* qcdxkm: topaz_wddm.cpp */
 #include "ShaderParse.h"
 #include "State.h"
 #include "Query.h"
@@ -270,7 +273,9 @@ SetShaderResources(enum pipe_shader_type shader_type,                  // IN
     * XXX: Now that the semantics are actually the same in gallium, should
     * probably think about not updating all always... It should just work.
     */
-   pipe->set_sampler_views(pipe, shader_type, 0, PIPE_MAX_SHADER_SAMPLER_VIEWS,
+   /* qcdxkm: freedreno keeps PIPE_MAX_SAMPLERS (32) views per stage; passing 128 overflowed
+    * fd_texture_stateobj::textures[] and crashed DWM */
+   pipe->set_sampler_views(pipe, shader_type, 0, PIPE_MAX_SAMPLERS,
                            0, false, sampler_views);
 }
 
@@ -512,6 +517,12 @@ CreateSampler(D3D10DDI_HDEVICE hDevice,                        // IN
    state.border_color.f[1] = pSamplerDesc->BorderColor[1];
    state.border_color.f[2] = pSamplerDesc->BorderColor[2];
    state.border_color.f[3] = pSamplerDesc->BorderColor[3];
+   /* qcdxkm: freedreno (PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_FREEDRENO) builds the border colour from
+    * border_color_format; left at PIPE_FORMAT_NONE the missing channels became 1, so D3D's transparent
+    * border (0,0,0,0) sampled as opaque black: DWM's 1-px AA fringes around windows/touch circles painted dark
+    * pixels outside the damage area -> the dashed strokes. Identity RGBA layout (QCDX_BCFMT=0 = old). */
+   if (!(getenv("QCDX_BCFMT") && getenv("QCDX_BCFMT")[0] == '0'))
+      state.border_color_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
 
    pSamplerState->handle = pipe->create_sampler_state(pipe, &state);
 }
@@ -1024,6 +1035,13 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
                                                  pShader->output_mapping);
 
    pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
+   {
+      /* qcdxkm: tag the TGSI dump above with the tokens pointer used in logs */
+      if (topaz_log_tgsi) {
+         fprintf(stderr, "---- (the TGSI above is PS %p)\n", (const void *)pShader->state.tokens);
+         fflush(stderr);
+      }
+   }
 
 }
 
@@ -1049,6 +1067,7 @@ PsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    struct pipe_context *pipe = pDevice->pipe;
    void *state = CastPipeShader(hShader);
 
+   g_topazPsTokens = CastShader(hShader) ? (const void *)CastShader(hShader)->state.tokens : NULL;   /* qcdxkm: logs */
    if (!state) {
       state = pDevice->empty_fs;
    }

@@ -40,6 +40,8 @@
 #include "util/u_framebuffer.h"
 #include "util/format/u_format.h"
 
+static void BindDepthStencil(Device *pDevice);   /* qcdxkm */
+
 
 static inline struct pipe_surface *
 GetPipeRenderTargetView(D3D10DDI_HRENDERTARGETVIEW hRenderTargetView)
@@ -201,6 +203,9 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_surface *surface = GetPipeRenderTargetView(hRenderTargetView);
    union pipe_color_union clear_color;
+
+   TopazStripsRestore(CastDevice(hDevice));
+   TopazLogDraw("ClearRTV", 0, NULL, (void *)surface->texture, surface->width, surface->height);
 
    /*
     * DX10 always uses float clear color but gallium does not.
@@ -772,6 +777,7 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
 
    struct pipe_context *pipe = pDevice->pipe;
 
+   TopazStripsRestore(pDevice);   /* qcdxkm: scissor strips belong to the old RT */
    pDevice->fb.nr_cbufs = 0;
    for (unsigned i = 0; i < RTargets; ++i) {
       pipe_surface_reference(&pDevice->fb.cbufs[i],
@@ -798,6 +804,8 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
    pDevice->fb.height = height;
 
    pipe->set_framebuffer_state(pipe, &pDevice->fb);
+   BindDepthStencil(pDevice);
+   TopazStripsResave(pDevice);   /* qcdxkm: DSV bound or not changes the depth state variant */
 }
 
 
@@ -964,6 +972,27 @@ CreateDepthStencilState(
 
    pDepthStencilState->handle =
       pipe->create_depth_stencil_alpha_state(pipe, &state);
+
+   /* D3D: with no depth-stencil view bound there is no depth or stencil test. Gallium drivers
+    * (freedreno) would still enable the RB depth test, so keep a variant with both off. */
+   state.depth_enabled = 0;
+   state.depth_writemask = 0;
+   state.stencil[0].enabled = 0;
+   state.stencil[1].enabled = 0;
+   pDepthStencilState->handle_nozs =
+      pipe->create_depth_stencil_alpha_state(pipe, &state);
+}
+
+/* qcdxkm: bind the depth-stencil state variant that matches the bound DSV */
+static void
+BindDepthStencil(Device *pDevice)
+{
+   struct pipe_context *pipe = pDevice->pipe;
+   DepthStencilState *dss = pDevice->dss;
+
+   if (!dss)
+      return;
+   pipe->bind_depth_stencil_alpha_state(pipe, pDevice->fb.zsbuf ? dss->handle : dss->handle_nozs);
 }
 
 
@@ -986,7 +1015,11 @@ DestroyDepthStencilState(D3D10DDI_HDEVICE hDevice,                         // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    DepthStencilState *pDepthStencilState = CastDepthStencilState(hDepthStencilState);
 
+   Device *pDevice = CastDevice(hDevice);
+   if (pDevice->dss == pDepthStencilState)
+      pDevice->dss = NULL;
    pipe->delete_depth_stencil_alpha_state(pipe, pDepthStencilState->handle);
+   pipe->delete_depth_stencil_alpha_state(pipe, pDepthStencilState->handle_nozs);
 }
 
 
@@ -1014,6 +1047,11 @@ SetDepthStencilState(D3D10DDI_HDEVICE hDevice,           // IN
    psr.ref_value[0] = StencilRef;
    psr.ref_value[1] = StencilRef;
 
-   pipe->bind_depth_stencil_alpha_state(pipe, state);
+   Device *pDevice = CastDevice(hDevice);
+   pDevice->dss = CastDepthStencilState(hState);
+   if (pDevice->dss)
+      BindDepthStencil(pDevice);
+   else
+      pipe->bind_depth_stencil_alpha_state(pipe, state);
    pipe->set_stencil_ref(pipe, psr);
 }

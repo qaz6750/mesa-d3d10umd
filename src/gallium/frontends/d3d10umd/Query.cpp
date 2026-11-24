@@ -31,6 +31,8 @@
  */
 
 
+#include <stdlib.h>
+#include "pipe/p_screen.h"
 #include "Query.h"
 #include "State.h"
 
@@ -115,6 +117,11 @@ CreateQuery(D3D10DDI_HDEVICE hDevice,                          // IN
    pQuery->Flags = pCreateQuery->MiscFlags;
 
    pQuery->pipe_type = TranslateQueryType(pCreateQuery->Query);
+   /* qcdxkm: EVENT is implemented with a fence (see QueryEnd/QueryGetData). Before, freedreno returned no
+    * query object, GetData reported "done" at once and DWM reused its NO_OVERWRITE ring space while draws
+    * using it were still unflushed -> stale windows, wrong shadows. */
+   if (pQuery->Type == D3D10DDI_QUERY_EVENT)
+      return;
    if (pQuery->pipe_type < PIPE_QUERY_TYPES) {
       pQuery->handle = pipe->create_query(pipe, pQuery->pipe_type, 0);
    }
@@ -142,6 +149,10 @@ DestroyQuery(D3D10DDI_HDEVICE hDevice, // IN
 
    if (pQuery->handle) {
       pipe->destroy_query(pipe, pQuery->handle);
+   }
+   if (pQuery->fence) {
+      struct pipe_screen *screen = CastDevice(hDevice)->screen;
+      screen->fence_reference(screen, &pQuery->fence, NULL);
    }
 }
 
@@ -205,6 +216,14 @@ QueryEnd(D3D10DDI_HDEVICE hDevice,  // IN
    if (state) {
       pipe->end_query(pipe, state);
    }
+   if (pQuery->Type == D3D10DDI_QUERY_EVENT && !state) {
+      struct pipe_screen *screen = pDevice->screen;
+      screen->fence_reference(screen, &pQuery->fence, NULL);
+      pipe->flush(pipe, &pQuery->fence, PIPE_FLUSH_DEFERRED);
+      pQuery->eventFenceMissing = pQuery->fence == NULL;
+      if (pQuery->eventFenceMissing)
+         SetError(hDevice, E_FAIL);
+   }
 }
 
 
@@ -232,6 +251,11 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    Query *pQuery = CastQuery(hQuery);
    struct pipe_query *state = pQuery->handle;
 
+   if (pQuery->eventFenceMissing) {
+      SetError(hDevice, E_FAIL);
+      return;
+   }
+
    /*
     * Never return data for recently emitted queries immediately, to make
     * wgfasync happy.
@@ -249,6 +273,26 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    memset(&result, 0, sizeof result);
 
    bool ret;
+
+   if (pQuery->Type == D3D10DDI_QUERY_EVENT && !state) {
+      struct pipe_screen *screen = pDevice->screen;
+      if (pQuery->fence) {
+         /* without DO_NOT_FLUSH the deferred work is submitted now (passing the context) */
+         ret = screen->fence_finish(screen, (Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH) ? NULL : pipe,
+                                    pQuery->fence, 0);
+      } else {
+         ret = true;   /* never issued */
+      }
+      if (!ret) {
+         SetError(hDevice, DXGI_DDI_ERR_WASSTILLDRAWING);
+         return;
+      }
+      if (pData && DataSize >= sizeof(BOOL))
+         *(BOOL *)pData = TRUE;
+      if ((pQuery->SeqNo - pDevice->LastFinishedQuerySeqNo) > 0)
+         pDevice->LastFinishedQuerySeqNo = pQuery->SeqNo;
+      return;
+   }
 
    if (state) {
       ret = pipe->get_query_result(pipe, state, wait, &result);

@@ -16,6 +16,8 @@ struct gdikmt_device_d3dddi {
    HANDLE hRTResource;
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
+   SRWLOCK qcdxSubmitLock;
+   struct gdikmt_context *qcdxSubmitContext;
 };
 
 

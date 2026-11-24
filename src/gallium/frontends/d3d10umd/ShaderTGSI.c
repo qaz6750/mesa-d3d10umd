@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /**************************************************************************
  *
  * Copyright 2012-2021 VMware, Inc.
@@ -1305,6 +1306,30 @@ Shader_tgsi_translate(const unsigned *code,
    }
    sx.addr_cur = 0;
 
+   /* qcdxkm: D3D scissor in the pixel shader. The hardware scissor is widened to whole 2x2 quads
+    * (Rasterizer.cpp) because on a6xx scissored-out pixels are no helper lanes and DDX/DDY at scissor edges
+    * were garbage (DWM's downscale shader left 1-px strokes). Pixels outside the real D3D scissor are
+    * demoted here: no write, but still helpers. CONST[15][0] = (minx, miny, 16384-maxx, 16384-maxy); all zero
+    * = no clipping. Opt-in QCDX_FSSCISSOR=1: on a6xx any kill/demote broke helper lanes along triangle
+    * diagonals (worse than the original edge columns). */
+   if (parser.header.type == D3D10_SB_PIXEL_SHADER &&
+       getenv("QCDX_FSSCISSOR") && getenv("QCDX_FSSCISSOR")[0] == '1') {
+      struct ureg_src pos = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_POSITION, 0, TGSI_INTERPOLATE_LINEAR);
+      struct ureg_src sc;
+      struct ureg_dst t = ureg_DECL_temporary(ureg);
+      struct ureg_dst m = ureg_DECL_temporary(ureg);
+
+      ureg_DECL_constant2D(ureg, 0, 0, 15);
+      sc = ureg_src_dimension(ureg_src_register(TGSI_FILE_CONSTANT, 0), 15);
+      ureg_ADD(ureg, ureg_writemask(m, TGSI_WRITEMASK_ZW), ureg_imm1f(ureg, 16384.0f), ureg_negate(sc));
+      ureg_SLT(ureg, ureg_writemask(t, TGSI_WRITEMASK_XY), pos, sc);
+      ureg_SGE(ureg, ureg_writemask(t, TGSI_WRITEMASK_ZW), ureg_swizzle(pos, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
+               TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y), ureg_src(m));
+      ureg_KILL_IF(ureg, ureg_negate(ureg_src(t)));
+      ureg_release_temporary(ureg, t);
+      ureg_release_temporary(ureg, m);
+   }
+
    while (Shader_parse_opcode(&parser, &opcode)) {
       const struct dx10_opcode_xlate *ox;
 
@@ -2310,6 +2335,15 @@ Shader_tgsi_translate(const unsigned *code,
    tokens = ureg_get_tokens(ureg, &nr_tokens);
    assert(tokens);
    ureg_destroy(ureg);
+
+   {
+      extern bool topaz_log_tgsi;   /* qcdxkm: topaz_wddm.cpp */
+      if (topaz_log_tgsi) {
+         fprintf(stderr, "---- TGSI (%u tokens)\n", nr_tokens);
+         tgsi_dump_to_file(tokens, 0, stderr);
+         fflush(stderr);
+      }
+   }
 
    if (st_debug & ST_DEBUG_TGSI) {
       tgsi_dump(tokens, 0);

@@ -32,6 +32,11 @@
 
 
 #include "Resource.h"
+unsigned g_topazMapFlushes;   /* qcdxkm: TIMING stats */
+long long g_topazMapFlushTicks;
+long long g_topazDrawTicks;
+unsigned g_topazDrawCount;
+extern "C" void fd_resource_debug_state(struct pipe_resource *prsc, void **bo, unsigned *batch_mask, int *write_batch, int *busy);
 #include "Format.h"
 #include "State.h"
 #include "Query.h"
@@ -251,9 +256,27 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_screen *screen = pipe->screen;
 
+   QcdxWddmLogf("CreateResource dim %u %ux%u fmt %u bind 0x%x misc 0x%x usage %u mips %u array %u samples %u primary %d\n",
+                 pCreateResource->ResourceDimension, pCreateResource->pMipInfoList[0].TexelWidth,
+                 pCreateResource->pMipInfoList[0].TexelHeight, pCreateResource->Format, pCreateResource->BindFlags,
+                 pCreateResource->MiscFlags, pCreateResource->Usage, pCreateResource->MipLevels,
+                 pCreateResource->ArraySize, pCreateResource->SampleDesc.Count, pCreateResource->pPrimaryDesc != NULL);
+   /* qcdxkm: C:\qcdx\umd.noflip -> primaries are not scanned out (DXGI then blts to the
+    * kernel primary instead of flipping ours); without PRIMARY_OPTIONAL the runtime retries */
+   bool topazNoScanout = false;
+   if (pCreateResource->pPrimaryDesc && QcdxWddmNoFlip()) {
+      pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
+      if (!(pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
+         QcdxWddmLogf("  primary without PRIMARY_OPTIONAL -> DXGI_DDI_ERR_UNSUPPORTED (no-flip mode)\n");
+         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+         return;
+      }
+      topazNoScanout = true;
+   }
+
    mtx_lock(&device->CreateResourceMtx);
    device->device.allocationVidPn = 0;
-   device->device.isPrimary = pCreateResource->pPrimaryDesc != NULL;
+   device->device.isPrimary = pCreateResource->pPrimaryDesc != NULL && !topazNoScanout;
    device->device.hRTResource = hRTResource.handle;
 
    Resource *pResource = CastResource(hResource);
@@ -306,6 +329,9 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       templat.bind |= PIPE_BIND_SHARED;
    }
+   if (templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
+      QcdxWddmTemplate(&templat);
+   }
 
    if (templat.target != PIPE_BUFFER) {
       if (!screen->is_format_supported(screen,
@@ -313,9 +339,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                        templat.target,
                                        templat.nr_samples,
                                        templat.nr_storage_samples,
-                                       templat.bind)) {
+                                       /* qcdxkm: layout/sharing bits are not format caps;
+                                        * freedreno rejects any bit it does not confirm */
+                                       templat.bind & ~(PIPE_BIND_LINEAR | PIPE_BIND_SHARED |
+                                                        PIPE_BIND_SCANOUT))) {
          debug_printf("%s: unsupported format %s\n",
                      __func__, util_format_name(templat.format));
+         QcdxWddmLogf("  unsupported format %s bind 0x%x\n", util_format_name(templat.format), templat.bind);
          SetError(hDevice, E_OUTOFMEMORY);
          goto unlock;
       }
@@ -331,6 +361,12 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->NumSubResources = pCreateResource->MipLevels * pCreateResource->ArraySize;
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
+
+   if (pResource->resource && templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
+      if (FAILED(QcdxWddmCreateAllocation(device, pResource, pCreateResource, topazNoScanout))) {
+         SetError(hDevice, E_OUTOFMEMORY);
+      }
+   }
 
    if (pCreateResource->pInitialDataUP) {
       if (pResource->buffer) {
@@ -441,6 +477,8 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    LOG_ENTRYPOINT();
    
    Device *pDevice = CastDevice(hDevice);
+   QcdxWddmLogf("OpenResource allocations %u priv %u\n", pOpenResource->NumAllocations,
+                 pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0);
    if (!pDevice->screen->resource_from_handle) {
       SetError(hDevice, E_OUTOFMEMORY);
       return;
@@ -457,6 +495,9 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
    whandle.handle = (HANDLE)pOpenResource->hKMResource.handle;
    
+   /* qcdxkm C2: the allocation's private data names the BO */
+   pResource->resource = QcdxWddmOpen(pDevice, pOpenResource, &pResource->hAllocation);
+   if (!pResource->resource)
    pResource->resource =
       pDevice->screen->resource_from_handle(pDevice->screen, NULL, &whandle, 0);
    
@@ -518,6 +559,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    }
    free(pResource->transfers);
 
+   QcdxWddmDestroyAllocation(CastDevice(hDevice), pResource);
    pipe_resource_reference(&pResource->resource, NULL);
 }
 
@@ -559,6 +601,12 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       break;
    case D3D10_DDI_MAP_WRITE_DISCARD:
       usage = PIPE_MAP_WRITE;
+      /* qcdxkm experiment QCDX_CBFLUSH=1: flush before DISCARD maps of constant buffers (are CB reads of
+       * pending draws not tracked by freedreno, so DISCARD writes in place?) */
+      if ((resource->bind & PIPE_BIND_CONSTANT_BUFFER) && getenv("QCDX_CBFLUSH") && getenv("QCDX_CBFLUSH")[0] == '1') {
+         pipe->flush(pipe, NULL, 0);
+         g_topazMapFlushes++;
+      }
       if (resource->last_level == 0 && resource->array_size == 1) {
          usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
       } else {
@@ -567,6 +615,28 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       break;
    case D3D10_DDI_MAP_WRITE_NOOVERWRITE:
       usage = PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED;
+      /* qcdxkm experiment QCDX_SYNCMAP=1: no unsynchronized maps (sync hazard test) */
+      if (getenv("QCDX_SYNCMAP") && getenv("QCDX_SYNCMAP")[0] == '1')
+         usage = PIPE_MAP_WRITE;
+      /* qcdxkm default: flush the pending batches first (no wait), the map stays unsynchronized. Without it
+       * DWM's NO_OVERWRITE ring writes land under draws of unflushed batches (stale/zoomed windows, clipped
+       * shadows; root cause still open, docs/P8_gpu.md). QCDX_SYNCMAP=0 disables it. */
+      {
+         const char *sm = getenv("QCDX_SYNCMAP");
+         char m = sm ? sm[0] : '0';   /* default off since the real cause (CB UpdateSubresourceUP) is handled */
+         /* 3 = only vertex-buffer maps, 4 = only index-buffer maps (narrowing experiments) */
+         if ((m == '2' || m == '1') ||
+             (m == '3' && (resource->bind & PIPE_BIND_VERTEX_BUFFER)) ||
+             (m == '4' && (resource->bind & PIPE_BIND_INDEX_BUFFER)))
+         {
+            LARGE_INTEGER a, b2;
+            QueryPerformanceCounter(&a);
+            pipe->flush(pipe, NULL, 0);
+            QueryPerformanceCounter(&b2);
+            g_topazMapFlushTicks += b2.QuadPart - a.QuadPart;
+            g_topazMapFlushes++;
+         }
+      }
       break;
    default:
       assert(0);
@@ -574,6 +644,20 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    }
 
    assert(SubResource < pResource->NumSubResources);
+
+   /* qcdxkm: QCDX_MAPLOG=1 logs buffer maps (type, busy state as freedreno sees it) */
+   if (pResource->buffer && getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
+      static unsigned topazMaps;
+      if (++topazMaps <= 40000)
+      {
+         void *bo; unsigned bm; int wb, busy;
+         fd_resource_debug_state(resource, &bo, &bm, &wb, &busy);
+         QcdxWddmLogf("MAP %s res %p size %u bind 0x%x bo %p batches 0x%x wb %d busy %d\n",
+                       DDIMap == D3D10_DDI_MAP_WRITE_DISCARD ? "DISCARD" :
+                       DDIMap == D3D10_DDI_MAP_WRITE_NOOVERWRITE ? "NOOVERWRITE" : "other",
+                       (void *)resource, resource->width0, resource->bind, bo, bm, wb, busy);
+      }
+   }
 
    unsigned level;
    struct pipe_box box;
@@ -603,6 +687,12 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       return;
    }
 
+   if (pResource->buffer && DDIMap == D3D10_DDI_MAP_WRITE_DISCARD &&
+       getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
+      void *bo; unsigned bm; int wb, busy;
+      fd_resource_debug_state(resource, &bo, &bm, &wb, &busy);
+      QcdxWddmLogf("  after DISCARD bo %p batches 0x%x\n", bo, bm);
+   }
    pMappedSubResource->pData = map;
    pMappedSubResource->RowPitch = pResource->transfers[SubResource]->stride;
    pMappedSubResource->DepthPitch = pResource->transfers[SubResource]->layer_stride;
@@ -716,6 +806,7 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   TopazStripsRestore(pDevice);
    if (!CheckPredicate(pDevice)) {
       return;
    }
@@ -723,6 +814,12 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    struct pipe_context *pipe = pDevice->pipe;
    Resource *pDstResource = CastResource(hDstResource);
    Resource *pSrcResource = CastResource(hSrcResource);
+   if (pDstResource->hAllocation || pSrcResource->hAllocation) {   /* qcdxkm: swapchain copies */
+      static unsigned topazCopies;
+      if (++topazCopies <= 3000)
+         QcdxWddmLogf("%s dst %p(alloc 0x%x) <- src %p(alloc 0x%x)\n", __func__, pDstResource->resource,
+                       pDstResource->hAllocation, pSrcResource->resource, pSrcResource->hAllocation);
+   }
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
    bool compatible;
@@ -790,6 +887,7 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
+   TopazStripsRestore(pDevice);
    if (!CheckPredicate(pDevice)) {
       return;
    }
@@ -797,6 +895,12 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    struct pipe_context *pipe = pDevice->pipe;
    Resource *pDstResource = CastResource(hDstResource);
    Resource *pSrcResource = CastResource(hSrcResource);
+   if (pDstResource->hAllocation || pSrcResource->hAllocation) {   /* qcdxkm: swapchain copies */
+      static unsigned topazCopies;
+      if (++topazCopies <= 3000)
+         QcdxWddmLogf("%s dst %p(alloc 0x%x) <- src %p(alloc 0x%x)\n", __func__, pDstResource->resource,
+                       pDstResource->hAllocation, pSrcResource->resource, pSrcResource->hAllocation);
+   }
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
 
@@ -822,6 +926,17 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
    }
 
+   if (pDstResource->hAllocation || pSrcResource->hAllocation)
+      QcdxWddmLogf("  copy dst xy %u,%u <- src box %d,%d %dx%d (lvl %u/%u, fmt %d/%d)\n", DstX, DstY, src_box.x, src_box.y,
+                    src_box.width, src_box.height, dst_level, src_level, (int)dst_resource->format, (int)src_resource->format);
+   /* qcdxkm experiment QCDX_COPYPATH=1: swapchain copies through the CPU (util_resource_copy_region)
+    * instead of freedreno's blitter - are the 1-px dashed strokes in DWM's thin damage-complement copies? */
+   if ((pDstResource->hAllocation || pSrcResource->hAllocation) &&
+       getenv("QCDX_COPYPATH") && getenv("QCDX_COPYPATH")[0] == '1') {
+      util_resource_copy_region(pipe, dst_resource, dst_level, DstX, DstY, DstZ + dst_layer,
+                                src_resource, src_level, &src_box);
+      return;
+   }
    if (areResourcesCompatible(src_resource, dst_resource)) {
       pipe->resource_copy_region(pipe,
                                  dst_resource, dst_level,
@@ -835,6 +950,7 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
                                 src_resource, src_level,
                                 &src_box);
    }
+   TopazProbeAfterCopy(pDevice);
 }
 
 
@@ -958,6 +1074,24 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
 
    struct pipe_transfer *transfer;
    void *map;
+   /* qcdxkm experiment QCDX_UPDSYNC=1: texture updates without DISCARD_RANGE (no shadow/staging path in
+    * freedreno, plain synchronized write) - dashed strokes inside window contents? */
+   unsigned updFlags = PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE;
+   /* qcdxkm experiment QCDX_UPDFLUSH: 1 = flush before UpdateSubresourceUP of constant buffers,
+    * 2 = of any buffer, 3 = of anything */
+   {
+      /* default 1: freedreno does not see that pending draws read a constant buffer that DWM rewrites with
+       * UpdateSubresourceUP and wrote it in place (stale/zoomed windows, clipped shadows). ~1 flush/frame. */
+      const char *uf = getenv("QCDX_UPDFLUSH");
+      char m = uf ? uf[0] : '1';
+      if ((m == '1' && (dst_resource->bind & PIPE_BIND_CONSTANT_BUFFER)) ||
+          (m == '2' && pDstResource->buffer) || m == '3') {
+         pipe->flush(pipe, NULL, 0);
+         g_topazMapFlushes++;
+      }
+   }
+   if (!pDstResource->buffer && getenv("QCDX_UPDSYNC") && getenv("QCDX_UPDSYNC")[0] == '1')
+      updFlags = PIPE_MAP_WRITE;
    if (pDstResource->buffer) {
       map = pipe->buffer_map(pipe,
                               dst_resource,
@@ -969,7 +1103,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       map = pipe->texture_map(pipe,
                               dst_resource,
                               level,
-                              PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE,
+                              updFlags,
                               &box,
                               &transfer);
    }

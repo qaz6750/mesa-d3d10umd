@@ -22,7 +22,7 @@ libgallium_d3d10 = shared_library(
     libgallium, libgalliumvl, libwsgdi
   ],
   dependencies : [
-    dep_ws2_32, idep_nir, driver_swrast, driver_virgl, idep_mesautil
+    dep_ws2_32, idep_nir, driver_swrast, driver_virgl, driver_freedreno, idep_mesautil
   ],
   name_prefix: '',
   install : true,
