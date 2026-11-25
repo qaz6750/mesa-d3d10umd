@@ -135,6 +135,7 @@ softpipe_displaytarget_layout(struct pipe_screen *screen,
 
    /* Round up the surface size to a multiple of the tile size?
     */
+   spr->unmap_on_flush = winsys->unmap_on_flush;
    spr->dt = winsys->displaytarget_create(winsys,
                                           spr->base.bind,
                                           spr->base.format,
@@ -144,6 +145,8 @@ softpipe_displaytarget_layout(struct pipe_screen *screen,
                                           map_front_private,
                                           &spr->stride[0] );
 
+   if (spr->dt)
+      spr->img_stride[0] = spr->stride[0] * spr->base.height0;
    return spr->dt != NULL;
 }
 
@@ -235,12 +238,14 @@ softpipe_resource_from_handle(struct pipe_screen *screen,
                util_is_power_of_two_or_zero(templat->height0) &&
                util_is_power_of_two_or_zero(templat->depth0));
 
+   spr->unmap_on_flush = winsys->unmap_on_flush;
    spr->dt = winsys->displaytarget_from_handle(winsys,
                                                templat,
                                                whandle,
                                                &spr->stride[0]);
    if (!spr->dt)
       goto fail;
+   spr->img_stride[0] = spr->stride[0] * templat->height0;
 
    return &spr->base;
 

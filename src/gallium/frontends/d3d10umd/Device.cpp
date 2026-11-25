@@ -51,8 +51,8 @@ extern "C" void fd_wddm_detach(void *ctx);   /* qcdxkm: freedreno/drm/wddm/fd_wd
 #include "gdikmt/gdikmt.h"
 
 EXTERN_C struct pipe_screen *
-d3d10_create_screen(gdikmt_device *device);
-EXTERN_C void d3d10_destroy_screen(struct pipe_screen *screen);
+d3d10_create_screen(gdikmt_device *device, struct sw_winsys **vidmm);
+EXTERN_C void d3d10_destroy_screen(struct pipe_screen *screen, struct sw_winsys *vidmm);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -76,7 +76,9 @@ ReleaseDeviceBackend(Device *device)
    if (device->pipe)
       device->pipe->destroy(device->pipe);
    if (device->screen)
-      d3d10_destroy_screen(device->screen);
+      d3d10_destroy_screen(device->screen, device->vidmmWinsys);
+   if (device->topazCtx)
+      device->topazCtx->destroy(device->topazCtx);
    fd_wddm_detach(&device->device.base);
    device->device.base.destroy(&device->device.base);
    mtx_destroy(&device->CreateResourceMtx);
@@ -175,8 +177,9 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (mtx_init(&pDevice->CreateResourceMtx, mtx_plain) != thrd_success)
       return E_OUTOFMEMORY;
 
-   struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base);
+   struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base, &pDevice->vidmmWinsys);
    if (!screen) {
+      QcdxWddmLogf("CreateDevice DDI=0x%x: backend initialization failed\n", pCreateData->Interface);
       ReleaseDeviceBackend(pDevice);
       return DXGI_ERROR_UNSUPPORTED;
    }
@@ -354,7 +357,11 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       _RotateResourceIdentities;
    pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions->pfnBlt =
       _Blt;
+   if (IS_DXGI1_1_BASE_FUNCTIONS(pCreateData->Interface, pCreateData->Version))
+      pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions2->pfnResolveSharedResource = _ResolveSharedResource;
 
+   QcdxWddmLogf("CreateDevice DDI=0x%x backend=%s VidMM=%u\n", pCreateData->Interface,
+                screen->get_name(screen), pDevice->vidmmWinsys != NULL);
    return S_OK;
 }
 
@@ -571,8 +578,12 @@ CheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice,        // IN
 {
    //LOG_ENTRYPOINT();
 
-   /* XXX: Disable MSAA */
-   *pNumQualityLevels = 0;
+   if (!pNumQualityLevels) {
+      SetError(hDevice, E_INVALIDARG);
+      return;
+   }
+   /* A single-sampled swap chain has one quality level (index zero). */
+   *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
 }
 
 

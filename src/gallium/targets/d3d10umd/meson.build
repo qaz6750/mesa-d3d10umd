@@ -10,9 +10,13 @@ libgallium_d3d10_def = custom_target(
 )
 
 gallium_d3d10_name = get_option('gallium-d3d10-dll-name')
+d3d10_sources = files('d3d10_gdi.c')
+if with_gallium_freedreno and gallium_d3d10_name == 'qcdx_d3d10'
+  d3d10_sources += import('windows').compile_resources('qcdx_version.rc')
+endif
 libgallium_d3d10 = shared_library(
   gallium_d3d10_name,
-  ['d3d10_gdi.c'],
+  d3d10_sources,
   vs_module_defs : libgallium_d3d10_def,
   include_directories : [
     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk

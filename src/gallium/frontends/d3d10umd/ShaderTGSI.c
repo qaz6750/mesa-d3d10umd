@@ -1033,17 +1033,15 @@ translate_src_operand(struct Shader_xlate *sx,
    case D3D10_SB_OPERAND_TYPE_IMMEDIATE_CONSTANT_BUFFER:
       assert(operand->base.index_dim == 1);
 
+      reg = sx->imms;
+      reg.Index += operand->base.index[0].imm;
       switch (operand->base.index[0].index_rep) {
       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
-         reg = sx->imms;
-         reg.Index += operand->base.index[0].imm;
          break;
       case D3D10_SB_OPERAND_INDEX_RELATIVE:
       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
-         reg = sx->imms;
-         reg.Index += operand->base.index[0].imm;
          reg = ureg_src_indirect(
-            sx->imms,
+            reg,
             translate_relative_operand(sx, &operand->base.index[0].rel));
          break;
       default:

@@ -64,16 +64,22 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
 {
 
    LOG_ENTRYPOINT();
+   if (!pPresentData || !pPresentData->hDevice)
+      return E_INVALIDARG;
 
    struct Device *device = CastDevice(pPresentData->hDevice);
    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
+   Resource *pDst = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
+   UINT src = pSrcResource ? pSrcResource->hAllocation : 0;
+   UINT dst = pDst ? pDst->hAllocation : 0;
+   QcdxTraceDisplay(&device->device, QCDX_PRESENT_BEGIN, src, dst, pPresentData->Flags.Value, S_OK);
 
    if (pSrcResource && pSrcResource->hAllocation) {
-      Resource *pDst = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
       TopazStripsRestore(device);
       TopazMaybeDump(device->pipe, pSrcResource->resource);
       TopazProbePresent();
       HRESULT hr = QcdxWddmPresent(device, pSrcResource, pDst, pPresentData->pDXGIContext);
+      QcdxTraceDisplay(&device->device, QCDX_PRESENT_RESULT, src, dst, pPresentData->Flags.Value, hr);
       static unsigned n;
       if (++n <= 60 || FAILED(hr) || getenv("QCDX_DRAWLOG"))
          QcdxWddmLogf("DXGI Present #%u res %p alloc 0x%x dst %p flags 0x%x -> 0x%08lx\n", n, pSrcResource->resource,
@@ -81,6 +87,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       return hr;
    }
    QcdxWddmLogf("DXGI Present rejected: missing WDDM source allocation\n");
+   QcdxTraceDisplay(&device->device, QCDX_PRESENT_RESULT, src, dst, pPresentData->Flags.Value, E_INVALIDARG);
    return E_INVALIDARG;
 }
 
@@ -131,32 +138,30 @@ HRESULT APIENTRY
 _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
 {
    LOG_ENTRYPOINT();
-   
+   if (!SetDisplayMode || !SetDisplayMode->hDevice || !SetDisplayMode->hResource)
+      return E_INVALIDARG;
+
    Device* device = CastDevice(SetDisplayMode->hDevice);
    Resource *res = CastResource(SetDisplayMode->hResource);
-
-   if (res->hAllocation) {
-      HRESULT hr = device->device.base.setDisplayMode(&device->device.base, res->hAllocation);
-      QcdxWddmLogf("DXGI SetDisplayMode alloc 0x%x -> 0x%08lx\n", res->hAllocation, (unsigned long)hr);
-      return hr;
+   D3DKMT_HANDLE allocation = res->hAllocation;
+   if (!device->device.KTCallbacks.pfnSetDisplayModeCb)
+      return DXGI_DDI_ERR_UNSUPPORTED;
+   if (!allocation) {
+      if (device->vidmmWinsys || !res->resource || !device->screen->resource_get_handle)
+         return E_INVALIDARG;
+      struct winsys_handle handle = {};
+      handle.type = WINSYS_HANDLE_TYPE_D3DKMT_ALLOC;
+      if (!device->screen->resource_get_handle(device->screen, NULL, res->resource, &handle, 0) || !handle.handle)
+         return DXGI_DDI_ERR_UNSUPPORTED;
+      allocation = (D3DKMT_HANDLE)(uintptr_t)handle.handle;
    }
-   QcdxWddmLogf("DXGI SetDisplayMode without allocation\n");
-
-   if(!device->screen->resource_get_handle) {
-      LOG_UNSUPPORTED_ENTRYPOINT();
-      return S_OK;
-   }
-
-   struct winsys_handle handle;
-   handle.type = WINSYS_HANDLE_TYPE_D3DKMT_ALLOC;
-   if(!device->screen->resource_get_handle(device->screen, NULL, res->resource, &handle, 0)) {
-      LOG_UNSUPPORTED_ENTRYPOINT();
-      return S_OK;
-   };
-
-   device->device.base.setDisplayMode(&device->device.base, (D3DKMT_HANDLE)handle.handle);
-
-   return S_OK;
+   QcdxTraceDisplay(&device->device, QCDX_MODE_BEGIN, allocation, 0, 0, S_OK);
+   /* The mode callback can pin and scan this primary before the first Present. */
+   HRESULT hr = QcdxWddmFinishResource(device, res);
+   if (SUCCEEDED(hr))
+      hr = device->device.base.setDisplayMode(&device->device.base, allocation);
+   QcdxWddmLogf("DXGI SetDisplayMode alloc 0x%x -> 0x%08lx\n", allocation, (unsigned long)hr);
+   return hr;
 }
 
 
@@ -216,9 +221,20 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourc
 {
    LOG_ENTRYPOINT();
 
+   if (!RotateResourceIdentities || !RotateResourceIdentities->hDevice ||
+       (RotateResourceIdentities->Resources && !RotateResourceIdentities->pResources))
+      return E_INVALIDARG;
    QcdxWddmLogf("DXGI RotateResourceIdentities %u\n", RotateResourceIdentities->Resources);
    if (RotateResourceIdentities->Resources <= 1) {
       return S_OK;
+   }
+   Device *owner = CastDevice(RotateResourceIdentities->hDevice);
+   if (owner->vidmmWinsys) {
+      Resource *first = CastResource(RotateResourceIdentities->pResources[0]);
+      HRESULT hr = QcdxWddmRotateVidmm(owner, RotateResourceIdentities);
+      QcdxTraceDisplay(&owner->device, QCDX_ROTATE, first ? first->hAllocation : 0,
+                       RotateResourceIdentities->Resources, 0, hr);
+      return hr;
    }
    UINT NumResources = RotateResourceIdentities->Resources;
    const DXGI_DDI_HRESOURCE *hResources = RotateResourceIdentities->pResources;
@@ -310,11 +326,67 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourc
  * ----------------------------------------------------------------------
  */
 
-HRESULT APIENTRY
-_Blt(DXGI_DDI_ARG_BLT *Blt)
+static HRESULT
+BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BLT *Blt)
 {
-   QcdxWddmLogf("DXGI Blt (unsupported)\n");
-   LOG_UNSUPPORTED_ENTRYPOINT();
+   if (!src || !dst || !src->resource || !dst->resource)
+      return E_INVALIDARG;
+   if (Blt->Rotate != DXGI_DDI_MODE_ROTATION_UNSPECIFIED && Blt->Rotate != DXGI_DDI_MODE_ROTATION_IDENTITY)
+      return DXGI_DDI_ERR_UNSUPPORTED;
 
+   if (Blt->SrcSubresource >= src->NumSubResources || Blt->DstSubresource >= dst->NumSubResources ||
+       src->buffer || dst->buffer || src->resource == dst->resource)
+      return E_INVALIDARG;
+   struct pipe_blit_info blit = {};
+   blit.src.resource = src->resource;
+   blit.src.format = src->resource->format;
+   blit.src.level = Blt->SrcSubresource % src->MipLevels;
+   blit.src.box.z = Blt->SrcSubresource / src->MipLevels;
+   blit.src.box.width = u_minify(src->resource->width0, blit.src.level);
+   blit.src.box.height = u_minify(src->resource->height0, blit.src.level);
+   blit.src.box.depth = 1;
+   blit.dst.resource = dst->resource;
+   blit.dst.format = dst->resource->format;
+   blit.dst.level = Blt->DstSubresource % dst->MipLevels;
+   if (Blt->DstRight > u_minify(dst->resource->width0, blit.dst.level) ||
+       Blt->DstBottom > u_minify(dst->resource->height0, blit.dst.level) ||
+       Blt->DstLeft > Blt->DstRight || Blt->DstTop > Blt->DstBottom)
+      return E_INVALIDARG;
+   blit.dst.box.x = Blt->DstLeft;
+   blit.dst.box.y = Blt->DstTop;
+   blit.dst.box.z = Blt->DstSubresource / dst->MipLevels;
+   blit.dst.box.width = Blt->DstRight - Blt->DstLeft;
+   blit.dst.box.height = Blt->DstBottom - Blt->DstTop;
+   blit.dst.box.depth = 1;
+   if (!blit.dst.box.width || !blit.dst.box.height)
+      return S_OK;
+   if (blit.src.format == blit.dst.format && blit.src.box.width == blit.dst.box.width &&
+       blit.src.box.height == blit.dst.box.height && !Blt->Flags.Resolve) {
+      device->pipe->resource_copy_region(device->pipe, blit.dst.resource, blit.dst.level,
+         blit.dst.box.x, blit.dst.box.y, blit.dst.box.z, blit.src.resource, blit.src.level, &blit.src.box);
+   } else {
+      if ((device->vidmmWinsys && Blt->Flags.Resolve) ||
+          !device->screen->is_format_supported(device->screen, blit.src.format, blit.src.resource->target,
+             blit.src.resource->nr_samples, blit.src.resource->nr_storage_samples, PIPE_BIND_SAMPLER_VIEW) ||
+          !device->screen->is_format_supported(device->screen, blit.dst.format, blit.dst.resource->target,
+             blit.dst.resource->nr_samples, blit.dst.resource->nr_storage_samples, PIPE_BIND_RENDER_TARGET))
+         return DXGI_DDI_ERR_UNSUPPORTED;
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = Blt->Flags.Stretch ? PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
+      device->pipe->blit(device->pipe, &blit);
+   }
    return S_OK;
+}
+
+HRESULT APIENTRY
+_Blt(DXGI_DDI_ARG_BLT *args)
+{
+   if (!args || !args->hDevice)
+      return E_INVALIDARG;
+   Device *device = CastDevice(args->hDevice);
+   Resource *src = CastResource(args->hSrcResource), *dst = CastResource(args->hDstResource);
+   HRESULT hr = BltResources(device, src, dst, args);
+   QcdxTraceDisplay(&device->device, QCDX_BLT, src ? src->hAllocation : 0,
+                    dst ? dst->hAllocation : 0, args->Flags.Value, hr);
+   return hr;
 }

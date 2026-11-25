@@ -39,7 +39,7 @@ int drmOpenWithType(const char *name, const char *busid, int type);
 
 /* qcdxkm: fake DRM fd bound to an escape callback (the D3D10 UMD's KMD channel). */
 typedef int (*fd_wddm_escape_fn)(void *ctx, void *data, unsigned size);
-int fd_wddm_open(fd_wddm_escape_fn escape, void *ctx);
+int fd_wddm_open(fd_wddm_escape_fn escape, void *ctx, unsigned *vidmm_features);
 int fd_wddm_dup(int fd);
 /* the D3D device behind ctx is gone: its slots must never escape again */
 void fd_wddm_detach(void *ctx);

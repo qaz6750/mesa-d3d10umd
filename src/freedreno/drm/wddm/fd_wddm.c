@@ -37,12 +37,13 @@ static SRWLOCK fds_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE fds_drained = CONDITION_VARIABLE_INIT;
 
 int
-fd_wddm_open(fd_wddm_escape_fn escape, void *ctx)
+fd_wddm_open(fd_wddm_escape_fn escape, void *ctx, unsigned *vidmm_features)
 {
    struct qcdx_escape query = {0};
    struct qcdx_capabilities caps = {0};
    int ret = -1;
 
+   *vidmm_features = 0;
    if (!escape) {
       errno = EINVAL;
       return -1;
@@ -62,11 +63,10 @@ fd_wddm_open(fd_wddm_escape_fn escape, void *ctx)
       return -1;
    }
    memcpy(&caps, query.data, sizeof(caps));
-      if (caps.size != sizeof(caps) || caps.abi_major != QCDX_ABI_MAJOR ||
-         caps.abi_minor != QCDX_ABI_MINOR ||
+   if (caps.size != sizeof(caps) || caps.abi_major != QCDX_ABI_MAJOR ||
+       caps.abi_minor != QCDX_ABI_MINOR ||
        caps.gpu_id != 660 || caps.gmem_size != 0x180000 ||
-       (caps.chip_id != 0x06060001 && caps.chip_id != 0x06060002) ||
-       (caps.features & QCDX_CAP_RENDER_REQUIRED) != QCDX_CAP_RENDER_REQUIRED) {
+       (caps.chip_id != 0x06060001 && caps.chip_id != 0x06060002)) {
       errno = ENODEV;
       return -1;
    }
@@ -75,6 +75,12 @@ fd_wddm_open(fd_wddm_escape_fn escape, void *ctx)
          errno = ENODEV;
          return -1;
       }
+   }
+   if ((caps.features & QCDX_CAP_RENDER_REQUIRED) != QCDX_CAP_RENDER_REQUIRED) {
+      if (caps.features & QCDX_CAP_VIDMM_PRESENT)
+         *vidmm_features = caps.features;
+      errno = ENOTSUP;
+      return -1;
    }
    AcquireSRWLockExclusive(&fds_lock);
    for (int i = 0; i < FD_WDDM_MAX; i++) {

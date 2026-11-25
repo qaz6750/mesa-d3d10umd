@@ -95,6 +95,23 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
    return status;
 }
 
+void
+QcdxTraceDisplay(struct gdikmt_device_d3dddi *device, qcdx_display_event event,
+                 UINT allocation, UINT detail, UINT flags, HRESULT hr)
+{
+   static_assert(QCDX_DISPLAY_EVENT_COUNT <= 16, "display trace uses two bits per event");
+   LONG bit = (LONG)(1u << (2 * event + FAILED(hr)));
+   if (!device->KTCallbacks.pfnEscapeCb || (InterlockedOr(&device->displayTraceMask, bit) & bit))
+      return;
+   qcdx_display_trace report = {(unsigned)event, allocation, detail, flags, (unsigned)hr};
+   qcdx_escape packet = {};
+   packet.magic = QCDX_ESC_MAGIC;
+   packet.nr = QCDX_NR_DISPLAY_TRACE;
+   packet.size = sizeof(report);
+   memcpy(packet.data, &report, sizeof(report));
+   device->base.escape(&device->base, &packet, sizeof(packet));
+}
+
 NTSTATUS
 gdikmt_d3dddi_render(struct gdikmt_context *_ctx, struct gdikmt_render *options)
 {
@@ -119,6 +136,8 @@ gdikmt_d3dddi_render(struct gdikmt_context *_ctx, struct gdikmt_render *options)
    render.Flags.ResizePatchLocationList = options->ResizePatchLocationList;
 
    NTSTATUS Status = dev->KTCallbacks.pfnRenderCb(dev->hRTDevice, &render);
+   if (FAILED(Status))
+      return Status;
 
    if(options->CompletionEvent) {
       D3DDDICB_SIGNALSYNCHRONIZATIONOBJECT2 signalEvent;
@@ -140,6 +159,37 @@ gdikmt_d3dddi_render(struct gdikmt_context *_ctx, struct gdikmt_render *options)
    ctx->base.PatchLocationListSize = render.NewPatchLocationListSize;
 
    return Status;
+}
+
+HRESULT
+QcdxCopyVidmmSurface(struct gdikmt_device_d3dddi *device, D3DKMT_HANDLE source, D3DKMT_HANDLE destination)
+{
+   AcquireSRWLockExclusive(&device->qcdxSubmitLock);
+   HRESULT hr = S_OK;
+   if (!device->qcdxSubmitContext)
+      hr = device->base.createContext(&device->base, &device->qcdxSubmitContext);
+   if (SUCCEEDED(hr)) {
+      gdikmt_context *ctx = device->qcdxSubmitContext;
+      const qcdx_render_command copy = {QCDX_ESC_MAGIC, QCDX_RENDER_COPY_SURFACE, 0, 0};
+      if (!ctx || !ctx->pCommandBuffer || ctx->CommandBufferSize < sizeof(copy) ||
+          !ctx->pAllocationList || ctx->AllocationListSize < 2) {
+         hr = E_UNEXPECTED;
+      } else {
+         memcpy(ctx->pCommandBuffer, &copy, sizeof(copy));
+         D3DDDI_ALLOCATIONLIST *list = ctx->pAllocationList;
+         list[0] = {};
+         list[0].hAllocation = source;
+         list[1] = {};
+         list[1].hAllocation = destination;
+         list[1].WriteOperation = TRUE;
+         gdikmt_render args = {};
+         args.CommandLength = sizeof(copy);
+         args.AllocationCount = 2;
+         hr = ctx->render(ctx, &args);
+      }
+   }
+   ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+   return hr;
 }
 
 void
@@ -172,6 +222,7 @@ gdikmt_d3dddi_createcontext(struct gdikmt_device *_device,
 
    D3DDDICB_CREATECONTEXT createContext;
    memset(&createContext, 0, sizeof(createContext));
+   createContext.EngineAffinity = 1;
    NTSTATUS Status =
       device->KTCallbacks.pfnCreateContextCb(device->hRTDevice, &createContext);
 
@@ -190,6 +241,8 @@ gdikmt_d3dddi_createcontext(struct gdikmt_device *_device,
       ctx->base.render = gdikmt_d3dddi_render;
 
       *out_ctx = &ctx->base;
+   } else {
+      FREE(ctx);
    }
 
    return Status;
@@ -219,6 +272,8 @@ gdikmt_d3dddi_createallocation(struct gdikmt_device *_device,
    NTSTATUS Status =
       device->KTCallbacks.pfnAllocateCb(device->hRTDevice, &createAllocation);
 
+   if (FAILED(Status))
+      QcdxTraceDisplay(device, QCDX_ALLOCATE_CB, 0, options->NumAllocations, device->isPrimary, Status);
    options->hResource = (HANDLE)createAllocation.hKMResource;
 
    return Status;
@@ -233,10 +288,11 @@ gdikmt_d3dddi_destroyallocation(struct gdikmt_device *_device, HANDLE hResource,
    D3DDDICB_DEALLOCATE destroyAllocation;
    memset(&destroyAllocation, 0, sizeof(destroyAllocation));
 
-   D3DKMT_HANDLE allocations[1];
-   allocations[0] = hAllocation;
-   destroyAllocation.NumAllocations = 1;
-   destroyAllocation.HandleList = allocations;
+   destroyAllocation.hResource = hResource;
+   if (!hResource) {
+      destroyAllocation.NumAllocations = 1;
+      destroyAllocation.HandleList = &hAllocation;
+   }
 
    return device->KTCallbacks.pfnDeallocateCb(device->hRTDevice,
                                               &destroyAllocation);
@@ -322,12 +378,11 @@ gdikmt_d3dddi_setdisplaymode(struct gdikmt_device *_device,
 {
    struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
 
-   D3DDDICB_SETDISPLAYMODE setMode;
+   D3DDDICB_SETDISPLAYMODE setMode = {};
    setMode.hPrimaryAllocation = hSrcAllocation;
-   setMode.PrivateDriverFormatAttribute = 0;
-
    HRESULT res =
       device->KTCallbacks.pfnSetDisplayModeCb(device->hRTDevice, &setMode);
+   QcdxTraceDisplay(device, QCDX_MODE_RESULT, hSrcAllocation, setMode.PrivateDriverFormatAttribute, 0, res);
    return res;
 };
 

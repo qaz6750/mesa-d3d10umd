@@ -172,6 +172,11 @@ sp_flush_tex_tile_cache(struct softpipe_tex_tile_cache *tc)
       for (pos = 0; pos < ARRAY_SIZE(tc->entries); pos++) {
          tc->entries[pos].addr.bits.invalid = 1;
       }
+      if (tc->tex_trans && softpipe_resource(tc->texture)->unmap_on_flush) {
+         tc->pipe->texture_unmap(tc->pipe, tc->tex_trans);
+         tc->tex_trans = NULL;
+         tc->tex_trans_map = NULL;
+      }
       tc->tex_z = -1;
    }
 
@@ -252,6 +257,11 @@ sp_find_cached_tile_tex(struct softpipe_tex_tile_cache *tc,
                               PIPE_MAP_READ | PIPE_MAP_UNSYNCHRONIZED,
                               0, 0, width, height, &tc->tex_trans);
 
+         if (!tc->tex_trans_map) {
+            tile->addr.bits.invalid = 1;
+            memset(&tile->data, 0, sizeof(tile->data));
+            return tile;
+         }
          tc->tex_level = addr.bits.level;
          tc->tex_z = addr.bits.z;
       }

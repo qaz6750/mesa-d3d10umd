@@ -202,10 +202,15 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                D3D10DDI_HRTRESOURCE hRTResource)                        // IN
 {
    LOG_ENTRYPOINT();
+   Resource *pResource = CastResource(hResource);
+   memset(pResource, 0, sizeof *pResource);
+   DXGI_DDI_PRIMARY_DESC *primary = pCreateResource->pPrimaryDesc;
+   if (primary)
+      primary->DriverFlags = 0;
 
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) ||
        (pCreateResource->pPrimaryDesc &&
-        pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL)) {
+        pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
 
       DebugPrintf("%s(%dx%dx%d hResource=%p)\n",
 	       __func__,
@@ -261,38 +266,30 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                  pCreateResource->pMipInfoList[0].TexelHeight, pCreateResource->Format, pCreateResource->BindFlags,
                  pCreateResource->MiscFlags, pCreateResource->Usage, pCreateResource->MipLevels,
                  pCreateResource->ArraySize, pCreateResource->SampleDesc.Count, pCreateResource->pPrimaryDesc != NULL);
-   /* qcdxkm: C:\qcdx\umd.noflip -> primaries are not scanned out (DXGI then blts to the
-    * kernel primary instead of flipping ours); without PRIMARY_OPTIONAL the runtime retries */
+   /* The firmware plane accepts 32-bit BGR primaries. GPU BOs use
+    * ExistingSysMem, which cannot be used for a WDDM 1.3 primary. */
+   auto reportError = [&](HRESULT hr, int line) {
+      QcdxTraceDisplay(&device->device, QCDX_CREATE_RESOURCE, 0, pCreateResource->Format, pCreateResource->BindFlags, hr);
+      SetErrorAt(hDevice, hr, "CreateResource", line);
+   };
    bool topazNoScanout = false;
-   if (pCreateResource->pPrimaryDesc && QcdxWddmNoFlip()) {
+   unsigned primaryFormat = pCreateResource->pPrimaryDesc ?
+      QcdxD3dFormat(FormatTranslate(pCreateResource->Format, false)) : 0;
+   if (pCreateResource->pPrimaryDesc &&
+       (!device->vidmmWinsys || (primaryFormat != 21 && primaryFormat != 22) || QcdxWddmNoFlip())) {
       pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       if (!(pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
          QcdxWddmLogf("  primary without PRIMARY_OPTIONAL -> DXGI_DDI_ERR_UNSUPPORTED (no-flip mode)\n");
-         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+         reportError(DXGI_DDI_ERR_UNSUPPORTED, __LINE__);
          return;
       }
       topazNoScanout = true;
    }
 
    mtx_lock(&device->CreateResourceMtx);
-   device->device.allocationVidPn = 0;
+   device->device.allocationVidPn = pCreateResource->pPrimaryDesc ? pCreateResource->pPrimaryDesc->VidPnSourceId : 0;
    device->device.isPrimary = pCreateResource->pPrimaryDesc != NULL && !topazNoScanout;
    device->device.hRTResource = hRTResource.handle;
-
-   Resource *pResource = CastResource(hResource);
-
-   memset(pResource, 0, sizeof *pResource);
-
-#if 0
-   if (pCreateResource->pPrimaryDesc) {
-      pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
-      if (!(pCreateResource->pPrimaryDesc->DriverFlags & DXGI_DDI_PRIMARY_OPTIONAL)) {
-         // http://msdn.microsoft.com/en-us/library/windows/hardware/ff568846.aspx
-         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
-         return;
-      }
-   }
-#endif
 
    pResource->Format = pCreateResource->Format;
    pResource->MipLevels = pCreateResource->MipLevels;
@@ -329,6 +326,12 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       templat.bind |= PIPE_BIND_SHARED;
    }
+   if (device->vidmmWinsys && QcdxWddmWanted(pCreateResource) &&
+       (templat.target != PIPE_TEXTURE_2D || templat.last_level || templat.nr_samples > 1 ||
+        !QcdxD3dFormat(templat.format))) {
+      reportError(DXGI_DDI_ERR_UNSUPPORTED, __LINE__);
+      goto unlock;
+   }
    if (templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
       QcdxWddmTemplate(&templat);
    }
@@ -346,25 +349,38 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
          debug_printf("%s: unsupported format %s\n",
                      __func__, util_format_name(templat.format));
          QcdxWddmLogf("  unsupported format %s bind 0x%x\n", util_format_name(templat.format), templat.bind);
-         SetError(hDevice, E_OUTOFMEMORY);
+         reportError(DXGI_DDI_ERR_UNSUPPORTED, __LINE__);
          goto unlock;
       }
-   }
-
-   pResource->resource = screen->resource_create(screen, &templat);
-   if (!pResource) {
-      DebugPrintf("%s: failed to create resource\n", __func__);
-      SetError(hDevice, E_OUTOFMEMORY);
-      goto unlock;
    }
 
    pResource->NumSubResources = pCreateResource->MipLevels * pCreateResource->ArraySize;
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
 
-   if (pResource->resource && templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
-      if (FAILED(QcdxWddmCreateAllocation(device, pResource, pCreateResource, topazNoScanout))) {
-         SetError(hDevice, E_OUTOFMEMORY);
+   if (!pResource->transfers) {
+      pResource->NumSubResources = 0;
+      reportError(E_OUTOFMEMORY, __LINE__);
+      goto unlock;
+   }
+   pResource->resource = screen->resource_create(screen, &templat);
+   if (!pResource->resource) {
+      free(pResource->transfers);
+      pResource->transfers = NULL;
+      pResource->NumSubResources = 0;
+      reportError(E_OUTOFMEMORY, __LINE__);
+      goto unlock;
+   }
+   if (templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
+      HRESULT hr = QcdxWddmCreateAllocation(device, pResource, pCreateResource, topazNoScanout);
+      if (FAILED(hr)) {
+         free(pResource->transfers);
+         pResource->transfers = NULL;
+         pResource->NumSubResources = 0;
+         pipe_resource_reference(&pResource->resource, NULL);
+         QcdxWddmDestroyAllocation(device, pResource);
+         reportError(hr, __LINE__);
+         goto unlock;
       }
    }
 
@@ -429,10 +445,10 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
+unlock:
    device->device.allocationVidPn = 0;
    device->device.isPrimary = false;
    device->device.hRTResource = NULL;
-unlock:
    mtx_unlock(&device->CreateResourceMtx);
 }
 
@@ -478,34 +494,32 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
    
    Device *pDevice = CastDevice(hDevice);
    QcdxWddmLogf("OpenResource allocations %u priv %u\n", pOpenResource->NumAllocations,
-                 pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0);
+                 pOpenResource->NumAllocations && pOpenResource->pOpenAllocationInfo ? pOpenResource->pOpenAllocationInfo[0].PrivateDriverDataSize : 0);
+   const D3DDDI_OPENALLOCATIONINFO *info = pOpenResource->NumAllocations ? pOpenResource->pOpenAllocationInfo : NULL;
+   const qcdx_alloc *desc = info && info->pPrivateDriverData && info->PrivateDriverDataSize >= sizeof(qcdx_alloc) ?
+      static_cast<const qcdx_alloc *>(info->pPrivateDriverData) : NULL;
+   auto reportError = [&](HRESULT hr, int line) {
+      QcdxTraceDisplay(&pDevice->device, QCDX_OPEN_RESOURCE, info ? info->hAllocation : 0,
+                       desc && desc->magic == QCDX_ALLOC_MAGIC ? desc->format : 0, info ? info->PrivateDriverDataSize : 0, hr);
+      SetErrorAt(hDevice, hr, "OpenResource", line);
+   };
+   Resource *pResource = CastResource(hResource);
+   memset(pResource, 0, sizeof *pResource);
    if (!pDevice->screen->resource_from_handle) {
-      SetError(hDevice, E_OUTOFMEMORY);
+      reportError(DXGI_DDI_ERR_UNSUPPORTED, __LINE__);
       return;
    }
    
    mtx_lock(&pDevice->CreateResourceMtx);
    pDevice->device.pOpenResource = pOpenResource;
    
-   Resource *pResource = CastResource(hResource);
-   memset(pResource, 0, sizeof *pResource);
-   
-   struct winsys_handle whandle;
-   memset(&whandle, 0, sizeof(whandle));
-   whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
-   whandle.handle = (HANDLE)pOpenResource->hKMResource.handle;
-   
-   /* qcdxkm C2: the allocation's private data names the BO */
-   pResource->resource = QcdxWddmOpen(pDevice, pOpenResource, &pResource->hAllocation);
-   if (!pResource->resource)
-   pResource->resource =
-      pDevice->screen->resource_from_handle(pDevice->screen, NULL, &whandle, 0);
-   
-   if (!pResource->resource) {
-      SetError(hDevice, E_OUTOFMEMORY);
+   HRESULT hr = QcdxWddmOpen(pDevice, pOpenResource, pResource);
+   if (FAILED(hr)) {
+      reportError(hr, __LINE__);
       goto unlock;
    }
-   
+   pResource->hRTResource = hRTResource.handle;
+
    pResource->buffer = false;
    pResource->Format = FormatDeTranslate(pResource->resource->format);
    pResource->MipLevels = pResource->resource->last_level + 1;
@@ -513,6 +527,12 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
       pResource->MipLevels * pResource->resource->array_size;
    pResource->transfers = (struct pipe_transfer **)calloc(
       pResource->NumSubResources, sizeof *pResource->transfers);
+   if (!pResource->transfers) {
+      pipe_resource_reference(&pResource->resource, NULL);
+      pResource->NumSubResources = 0;
+      QcdxWddmDestroyAllocation(pDevice, pResource);
+      reportError(E_OUTOFMEMORY, __LINE__);
+   }
 
 unlock:
    pDevice->device.pOpenResource = NULL;
@@ -559,8 +579,10 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    }
    free(pResource->transfers);
 
-   QcdxWddmDestroyAllocation(CastDevice(hDevice), pResource);
+   if (pResource->hAllocation)
+      pipe->flush(pipe, NULL, 0);
    pipe_resource_reference(&pResource->resource, NULL);
+   QcdxWddmDestroyAllocation(CastDevice(hDevice), pResource);
 }
 
 
@@ -646,7 +668,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    assert(SubResource < pResource->NumSubResources);
 
    /* qcdxkm: QCDX_MAPLOG=1 logs buffer maps (type, busy state as freedreno sees it) */
-   if (pResource->buffer && getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
+   if (!CastDevice(hDevice)->vidmmWinsys && pResource->buffer && getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
       static unsigned topazMaps;
       if (++topazMaps <= 40000)
       {
@@ -687,7 +709,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       return;
    }
 
-   if (pResource->buffer && DDIMap == D3D10_DDI_MAP_WRITE_DISCARD &&
+   if (!CastDevice(hDevice)->vidmmWinsys && pResource->buffer && DDIMap == D3D10_DDI_MAP_WRITE_DISCARD &&
        getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
       void *bo; unsigned bm; int wb, busy;
       fd_resource_debug_state(resource, &bo, &bm, &wb, &busy);

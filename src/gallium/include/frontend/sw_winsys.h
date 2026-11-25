@@ -63,6 +63,9 @@ struct sw_displaytarget;
  */
 struct sw_winsys
 {
+   /* CPU display-target locks must end before another device can use a frame. */
+   bool unmap_on_flush;
+
    void 
    (*destroy)( struct sw_winsys *ws );
 

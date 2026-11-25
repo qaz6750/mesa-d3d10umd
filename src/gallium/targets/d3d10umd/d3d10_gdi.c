@@ -28,6 +28,7 @@
 
 
 #include "gdikmt/gdikmt.h"
+#include "frontend/sw_winsys.h"
 #include "util/u_debug.h"
 #include "target-helpers/inline_debug_helper.h"
 #include "llvmpipe/lp_public.h"
@@ -77,12 +78,14 @@ d3d10_fd_escape(void *ctx, void *data, unsigned size)
 #include <d3dkmthk.h>
 
 extern struct pipe_screen *
-d3d10_create_screen(struct gdikmt_device* device);
+d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm);
 
 void
-d3d10_destroy_screen(struct pipe_screen *screen)
+d3d10_destroy_screen(struct pipe_screen *screen, struct sw_winsys *vidmm)
 {
    screen->destroy(screen);
+   if (vidmm)
+      vidmm->destroy(vidmm);
 #if defined(GALLIUM_FREEDRENO) && !defined(GALLIUM_VIRGL)
    glsl_type_singleton_decref();
 #endif
@@ -103,7 +106,7 @@ void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
 }
 
 struct pipe_screen *
-d3d10_create_screen(struct gdikmt_device* device)
+d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm)
 {
    const char *default_driver;
    const char *driver;
@@ -115,8 +118,25 @@ d3d10_create_screen(struct gdikmt_device* device)
 #endif
 #ifdef GALLIUM_FREEDRENO
    {
-      int fd;
-      fd = fd_wddm_open(d3d10_fd_escape, device);
+      unsigned vidmm_features;
+      int fd = fd_wddm_open(d3d10_fd_escape, device, &vidmm_features);
+#ifdef GALLIUM_SOFTPIPE
+      if (fd < 0 && vidmm_features) {
+         extern struct sw_winsys *qcdx_create_vidmm_winsys(struct gdikmt_device *, unsigned);
+         winsys = qcdx_create_vidmm_winsys(device, vidmm_features);
+         if (!winsys)
+            return NULL;
+         glsl_type_singleton_init_or_ref();
+         screen = softpipe_create_screen(winsys);
+         if (!screen) {
+            glsl_type_singleton_decref();
+            winsys->destroy(winsys);
+            return NULL;
+         }
+         *vidmm = winsys;
+         return screen;
+      }
+#endif
       if (fd < 0)
          return NULL;
       /* freedreno/NIR need the GLSL type cache; on Linux the GL frontend creates it */

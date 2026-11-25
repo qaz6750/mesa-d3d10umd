@@ -64,6 +64,7 @@ struct softpipe_resource
     */
    bool pot;
    bool userBuffer;
+   bool unmap_on_flush;
 
    unsigned timestamp;
 };

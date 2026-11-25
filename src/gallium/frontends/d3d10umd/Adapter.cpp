@@ -79,6 +79,8 @@ OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
       return DXGI_ERROR_UNSUPPORTED;
 #endif
 
+   QcdxWddmLogInit();
+
    Adapter *pAdaptor = (Adapter *)calloc(sizeof *pAdaptor, 1);
    if (!pAdaptor)
       return E_OUTOFMEMORY;
@@ -112,12 +114,6 @@ EXTERN_C HRESULT APIENTRY
 OpenAdapter10(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
    LOG_ENTRYPOINT();
-
-   /* qcdxkm: opt-in only while the driver is experimental. Our adapter is DXGI adapter 0, so
-    * without this explorer/DWM render on it and a GPU hang freezes the desktop. */
-   if (!QcdxWddmEnabled()) {
-      return E_FAIL;
-   }
 
    /*
     * This is checked here and not on the common code because MSDN docs
@@ -186,6 +182,8 @@ GetSupportedVersions(D3D10DDI_HADAPTER hAdapter,
 {
    LOG_ENTRYPOINT();
 
+   if (!puEntries)
+      return E_INVALIDARG;
    if (pSupportedDDIInterfaceVersions &&
        *puEntries < ARRAYSIZE(SupportedDDIInterfaceVersions)) {
       return E_OUTOFMEMORY;
@@ -218,7 +216,16 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
         const D3D10_2DDIARG_GETCAPS *pData)
 {
    LOG_ENTRYPOINT();
+   if (!pData || !pData->pData)
+      return E_INVALIDARG;
+   if (pData->Type == D3D11DDICAPS_3DPIPELINESUPPORT &&
+       pData->DataSize < sizeof(D3D11DDI_3DPIPELINESUPPORT_CAPS))
+      return E_INVALIDARG;
    memset(pData->pData, 0, pData->DataSize);
+   if (pData->Type == D3D11DDICAPS_3DPIPELINESUPPORT) {
+      auto *pipeline = static_cast<D3D11DDI_3DPIPELINESUPPORT_CAPS *>(pData->pData);
+      pipeline->Caps = D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0);
+   }
    return S_OK;
 }
 
@@ -239,12 +246,6 @@ EXTERN_C HRESULT APIENTRY
 OpenAdapter10_2(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
    LOG_ENTRYPOINT();
-
-   /* qcdxkm: opt-in only while the driver is experimental. Our adapter is DXGI adapter 0, so
-    * without this explorer/DWM render on it and a GPU hang freezes the desktop. */
-   if (!QcdxWddmEnabled()) {
-      return E_FAIL;
-   }
 
    HRESULT hr = OpenAdapterCommon(pOpenData);
 

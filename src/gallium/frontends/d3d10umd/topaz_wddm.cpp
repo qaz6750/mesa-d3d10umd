@@ -1,17 +1,13 @@
 /*
- * qcdxkm step C2: the WDDM side of resources that leave the UMD (docs/P8_gpu.md in topaz-woa).
- *
- * freedreno renders into BOs owned by the qcdxkm KMD (msm escapes). Resources that Dxgkrnl, DWM or
- * other processes must see (primaries, swapchain buffers, shared surfaces) also get a WDDM allocation
- * whose private data (struct qcdx_alloc) names the BO: the KMD then scans out / blts / opens the
- * same pages. Such resources are created linear. Present goes through pfnPresentCb after the GPU work
- * finished (the KMD copies with the CPU). Same model as viogpu3d + virgl_gdi_winsys, but the BO stays
- * a freedreno BO.
+ * A shared or presentable D3D resource has a WDDM allocation. Software devices
+ * use VidMM storage directly. Freedreno BO imports use ExistingSysMem for
+ * non-primary surfaces. DXGI presents pass the runtime allocation handles.
  */
 
 #include <stdarg.h>
 
 #include "Device.h"
+#include "DxgiFns.h"
 #include "State.h"
 #include "Debug.h"
 #include "Format.h"
@@ -23,8 +19,8 @@
 
 #include "../../../freedreno/drm/wddm/qcdx_escape.h"
 
-static unsigned
-TopazD3dFormat(enum pipe_format f)
+unsigned
+QcdxD3dFormat(enum pipe_format f)
 {
    switch (f) {
    case PIPE_FORMAT_B8G8R8A8_UNORM:
@@ -36,6 +32,10 @@ TopazD3dFormat(enum pipe_format f)
    case PIPE_FORMAT_R8G8B8A8_UNORM:
    case PIPE_FORMAT_R8G8B8A8_SRGB:
       return 32;                                   /* D3DDDIFMT_A8B8G8R8 */
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+      return 31;                                   /* D3DDDIFMT_A2B10G10R10 */
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+      return 113;                                  /* D3DDDIFMT_A16B16G16R16F */
    default:
       return 0;
    }
@@ -49,8 +49,14 @@ TopazPipeFormat(unsigned d3d)
       return PIPE_FORMAT_B8G8R8X8_UNORM;
    case 32:
       return PIPE_FORMAT_R8G8B8A8_UNORM;
-   default:
+   case 21:
       return PIPE_FORMAT_B8G8R8A8_UNORM;
+   case 31:
+      return PIPE_FORMAT_R10G10B10A2_UNORM;
+   case 113:
+      return PIPE_FORMAT_R16G16B16A16_FLOAT;
+   default:
+      return PIPE_FORMAT_NONE;
    }
 }
 
@@ -82,6 +88,15 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    NTSTATUS st;
 
    memset(&wh, 0, sizeof(wh));
+   if (pDevice->vidmmWinsys) {
+      /* The display-target constructor has already called AllocateCb. */
+      pResource->hRTResource = pDevice->device.hRTResource;
+      wh.type = WINSYS_HANDLE_TYPE_D3DKMT_ALLOC;
+      if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh, 0))
+         return E_FAIL;
+      pResource->hAllocation = (D3DKMT_HANDLE)(uintptr_t)wh.handle;
+      return S_OK;
+   }
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
    if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh, 0)) {
       QcdxWddmLogf("topaz: resource_get_handle failed\n");
@@ -94,7 +109,11 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    a.width = res->width0;
    a.height = res->height0;
    a.pitch = wh.stride;
-   a.format = TopazD3dFormat(res->format);
+   a.format = QcdxD3dFormat(res->format);
+   if (!a.format || (uint64_t)wh.stride * res->height0 > UINT_MAX)
+      return DXGI_DDI_ERR_UNSUPPORTED;
+   if (util_format_is_srgb(res->format))
+      a.flags |= QCDX_ALLOC_F_SRGB;
    a.bo = (unsigned)(uintptr_t)wh.handle;
    a.bo_offset = wh.offset;
    a.size = wh.stride * res->height0;
@@ -134,38 +153,56 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
       return E_OUTOFMEMORY;
    }
    pResource->hAllocation = ai.hAllocation;
+   pResource->hRTResource = pDevice->device.hRTResource;
    return S_OK;
 }
 
 void
 QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource)
 {
-   /* allocations made with hRTResource belong to the runtime resource: the runtime frees them
-      (pfnDeallocateCb here returned STATUS_INVALID_PARAMETER, D3D11 journal) */
-   (void)pDevice;
+   /* Device-private softpipe allocations are released by DestroySurface. */
+   if (pResource->hRTResource || (pResource->hAllocation && !pDevice->vidmmWinsys)) {
+      gdikmt_device *device = &pDevice->device.base;
+      HRESULT hr = device->destroyAllocation(device, pResource->hRTResource, pResource->hAllocation);
+      if (FAILED(hr)) {
+         QcdxWddmLogf("DeallocateCb resource=%p allocation=%x hr=%08lx\n",
+                      pResource->hRTResource, pResource->hAllocation, (unsigned long)hr);
+         if (hr == D3DDDIERR_DEVICEREMOVED)
+            pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
+      }
+   }
+   pResource->hRTResource = NULL;
    pResource->hAllocation = 0;
 }
 
-/* OpenResource of a resource created by another process / the kernel: import its BO by name */
-struct pipe_resource *
-QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, D3DKMT_HANDLE *phAllocation)
+/* Open the storage described by Dxgkrnl for this device. */
+HRESULT
+QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *resource)
 {
    const struct qcdx_alloc *a;
    struct pipe_resource templat;
    struct winsys_handle wh;
 
-   if (pOpen->NumAllocations < 1 || pOpen->pOpenAllocationInfo == NULL) {
-      return NULL;
-   }
-   a = (const struct qcdx_alloc *)pOpen->pOpenAllocationInfo[0].pPrivateDriverData;
-   if (a == NULL || pOpen->pOpenAllocationInfo[0].PrivateDriverDataSize < sizeof(*a) ||
-       a->magic != QCDX_ALLOC_MAGIC || a->bo == 0) {
-      QcdxWddmLogf("topaz: OpenResource without a BO (kind %u)\n", a ? a->kind : ~0u);
-      return NULL;
-   }
+   if (pOpen->NumAllocations != 1 || !pOpen->pOpenAllocationInfo)
+      return E_INVALIDARG;
+   const D3DDDI_OPENALLOCATIONINFO &info = pOpen->pOpenAllocationInfo[0];
+   if (!info.hAllocation || !info.pPrivateDriverData || info.PrivateDriverDataSize < sizeof(*a))
+      return E_INVALIDARG;
+   a = (const struct qcdx_alloc *)info.pPrivateDriverData;
+   if (a->magic != QCDX_ALLOC_MAGIC || a->kind > QCDX_ALLOC_GDI)
+      return E_INVALIDARG;
+   enum pipe_format format = TopazPipeFormat(a->format);
+   if (format != PIPE_FORMAT_NONE && (a->flags & QCDX_ALLOC_F_SRGB))
+      format = util_format_srgb(format);
+   if (format == PIPE_FORMAT_NONE || (!pDevice->vidmmWinsys && !a->bo))
+      return DXGI_DDI_ERR_UNSUPPORTED;
+   unsigned pixelBytes = util_format_get_blocksize(format);
+   if (!a->width || !a->height || a->pitch % pixelBytes || (uint64_t)a->width * pixelBytes > a->pitch ||
+       (uint64_t)a->height * a->pitch > a->size)
+      return E_INVALIDARG;
    memset(&templat, 0, sizeof(templat));
    templat.target = PIPE_TEXTURE_2D;
-   templat.format = TopazPipeFormat(a->format);
+   templat.format = format;
    templat.width0 = a->width;
    templat.height0 = a->height;
    templat.depth0 = 1;
@@ -173,24 +210,62 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, D3DKMT_HAND
    templat.last_level = 0;
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR | PIPE_BIND_SHARED;
    memset(&wh, 0, sizeof(wh));
-   wh.type = WINSYS_HANDLE_TYPE_SHARED;
-   wh.handle = (HANDLE)(uintptr_t)a->bo;
+   wh.type = pDevice->vidmmWinsys ? WINSYS_HANDLE_TYPE_D3DKMT_ALLOC : WINSYS_HANDLE_TYPE_SHARED;
+   wh.handle = (HANDLE)(uintptr_t)(pDevice->vidmmWinsys ? info.hAllocation : a->bo);
    wh.stride = a->pitch;
-   wh.offset = a->bo_offset;
-   *phAllocation = pOpen->pOpenAllocationInfo[0].hAllocation;
-   return pDevice->screen->resource_from_handle(pDevice->screen, &templat, &wh, 0);
+   wh.offset = pDevice->vidmmWinsys ? 0 : a->bo_offset;
+   resource->resource = pDevice->screen->resource_from_handle(pDevice->screen, &templat, &wh, 0);
+   if (!resource->resource)
+      return E_OUTOFMEMORY;
+   resource->hAllocation = info.hAllocation;
+   return S_OK;
 }
 
 extern "C" void fd_bo_cache_debug_stats(unsigned *v);
 extern "C" void fd_bo_del_debug_stats(unsigned *v);
 extern "C" void fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last);
 
+static HRESULT
+FinishFence(Device *device, struct pipe_fence_handle *fence)
+{
+   if (!fence)
+      return E_FAIL;
+   struct pipe_screen *screen = device->screen;
+   bool completed = screen->fence_finish(screen, device->pipe, fence, OS_TIMEOUT_INFINITE);
+   screen->fence_reference(screen, &fence, NULL);
+   return completed ? S_OK : E_FAIL;
+}
+
+HRESULT
+QcdxWddmFinishResource(Device *device, Resource *resource)
+{
+   if (!resource->resource)
+      return E_INVALIDARG;
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_fence_handle *fence = NULL;
+   if (pipe->flush_resource)
+      pipe->flush_resource(pipe, resource->resource);
+   pipe->flush(pipe, &fence, 0);
+   return FinishFence(device, fence);
+}
+
+HRESULT APIENTRY
+_ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *args)
+{
+   if (!args || !args->hDevice || !args->hResource)
+      return E_INVALIDARG;
+   Device *device = CastDevice(args->hDevice);
+   Resource *resource = CastResource(args->hResource);
+   HRESULT hr = resource->hAllocation ? QcdxWddmFinishResource(device, resource) : E_INVALIDARG;
+   QcdxTraceDisplay(&device->device, QCDX_RESOLVE_SHARED, resource->hAllocation, resource->Format, 0, hr);
+   return hr;
+}
+
 /* DXGI Present: finish the GPU work on the source, then let the KMD blt/flip it */
 HRESULT
 QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext)
 {
    struct pipe_context *pipe = pDevice->pipe;
-   struct pipe_screen *screen = pDevice->screen;
    struct pipe_fence_handle *fence = NULL;
 
    if (!pSrc || !pSrc->hAllocation || (pDst && !pDst->hAllocation))
@@ -207,12 +282,9 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    QueryPerformanceCounter(&t0);
    pipe->flush(pipe, &fence, 0);
    QueryPerformanceCounter(&t1);
-   if (!fence)
-      return E_FAIL;
-   const bool completed = screen->fence_finish(screen, pipe, fence, OS_TIMEOUT_INFINITE);
-   screen->fence_reference(screen, &fence, NULL);
-   if (!completed)
-      return E_FAIL;
+   HRESULT wait = FinishFence(pDevice, fence);
+   if (FAILED(wait))
+      return wait;
    QueryPerformanceCounter(&t2);
    if (timing) {
       double ms = 1000.0 / (double)qf.QuadPart;
@@ -226,7 +298,7 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
          extern long long g_topazMapFlushTicks;
          extern long long g_topazDrawTicks;
          extern unsigned g_topazDrawCount;
-         {
+         if (!pDevice->vidmmWinsys) {
             uint32_t ctl, last;
             fd_context_debug_fences(pipe, &ctl, &last);
             unsigned cs[6];
@@ -246,24 +318,9 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
       }
    }
    if (!pDevice->topazCtx) {
-      /* own pfnCreateContextCb: gdikmt's leaves EngineAffinity 0 (invalid for a MultiEngineAware KMD) */
-      struct gdikmt_context_d3dddi *c = (struct gdikmt_context_d3dddi *)calloc(1, sizeof(*c));
-      D3DDDICB_CREATECONTEXT cc;
-      HRESULT hrc;
-      if (!c)
-         return E_OUTOFMEMORY;
-      memset(&cc, 0, sizeof(cc));
-      cc.NodeOrdinal = 0;
-      cc.EngineAffinity = 1;
-      hrc = pDevice->device.KTCallbacks.pfnCreateContextCb(pDevice->device.hRTDevice, &cc);
-      QcdxWddmLogf("topaz: CreateContextCb -> 0x%08lx hContext %p\n", (unsigned long)hrc, cc.hContext);
-      if (FAILED(hrc)) {
-         free(c);
-         return hrc;
-      }
-      c->base.device = &pDevice->device.base;
-      c->hContext = cc.hContext;
-      pDevice->topazCtx = &c->base;
+      HRESULT hr = pDevice->device.base.createContext(&pDevice->device.base, &pDevice->topazCtx);
+      if (FAILED(hr))
+         return hr;
    }
    /* not gdikmt's present(): it never passes a destination; a DXGI blt present with hDstResource
       (DWM to its primary) needs hDstAllocation */
@@ -278,6 +335,7 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
       QueryPerformanceCounter(&c0);
       HRESULT hr = pDevice->device.pDXGIBaseCallbacks->pfnPresentCb(pDevice->device.hRTDevice, &p);
       QueryPerformanceCounter(&c1);
+      QcdxTraceDisplay(&pDevice->device, QCDX_PRESENT_CB, p.hSrcAllocation, p.hDstAllocation, 0, hr);
       if (timing)
          sumCb += (c1.QuadPart - c0.QuadPart) * 1000.0 / (double)qf.QuadPart;
       if (FAILED(hr))
@@ -293,15 +351,11 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
 extern "C" { bool topaz_log_tgsi; }
 static bool topaz_log_on;
 
-static void
-QcdxWddmLogInit(void)
+static BOOL CALLBACK
+QcdxInitLogOnce(PINIT_ONCE, PVOID, PVOID *)
 {
-   static bool done;
    char path[MAX_PATH];
 
-   if (done)
-      return;
-   done = true;
    /* C:\ProgramData\qcdx\umd.env: NAME=VALUE lines (e.g. FD_MESA_DEBUG=sysmem) for processes
     * without an environment of ours, like DWM; read before the screen is created */
    {
@@ -319,7 +373,7 @@ QcdxWddmLogInit(void)
       }
    }
    if (GetFileAttributesA("C:\\ProgramData\\qcdx\\umd.log.enable") == INVALID_FILE_ATTRIBUTES)
-      return;
+      return TRUE;
    snprintf(path, sizeof(path), "C:\\ProgramData\\qcdx\\umd-%lu.log", (unsigned long)GetCurrentProcessId());
    if (freopen(path, "a", stderr)) {
       setvbuf(stderr, NULL, _IONBF, 0);
@@ -328,6 +382,14 @@ QcdxWddmLogInit(void)
       fprintf(stderr, "==== qcdx UMD log, pid %lu, FD_MESA_DEBUG=%s ====\n", (unsigned long)GetCurrentProcessId(),
               getenv("FD_MESA_DEBUG") ? getenv("FD_MESA_DEBUG") : "");
    }
+   return TRUE;
+}
+
+void
+QcdxWddmLogInit(void)
+{
+   static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+   InitOnceExecuteOnce(&once, QcdxInitLogOnce, NULL, NULL);
 }
 
 extern "C" void
@@ -353,28 +415,4 @@ bool
 QcdxWddmNoFlip(void)
 {
    return GetFileAttributesA("C:\\qcdx\\umd.noflip") != INVALID_FILE_ATTRIBUTES;
-}
-
-/* opt-in while experimental: env QCDX_ENABLE or C:\qcdx\umd.enable (needed for DWM) */
-bool
-QcdxWddmEnabled(void)
-{
-   QcdxWddmLogInit();
-   bool on = GetEnvironmentVariableA("QCDX_ENABLE", NULL, 0) != 0 ||
-             GetFileAttributesA("C:\\qcdx\\umd.enable") != INVALID_FILE_ATTRIBUTES;
-   /* C:\qcdx\umd.dwmonly: only dwm.exe uses the Adreno UMD; other processes fail OpenAdapter and the D3D
-    * runtime falls back (WARP) - safety switch while app processes crash/hang on our UMD */
-   if (on && GetFileAttributesA("C:\\qcdx\\umd.dwmonly") != INVALID_FILE_ATTRIBUTES) {
-      char path[MAX_PATH];
-      DWORD n = GetModuleFileNameA(NULL, path, sizeof(path));
-      const char *base = path;
-      for (DWORD i = 0; i < n; i++)
-         if (path[i] == '\\' || path[i] == '/')
-            base = path + i + 1;
-      if (_stricmp(base, "dwm.exe") != 0) {
-         QcdxWddmLogf("topaz: umd.dwmonly - %s does not use the Adreno UMD\n", base);
-         on = false;
-      }
-   }
-   return on;
 }

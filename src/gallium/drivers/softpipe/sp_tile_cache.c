@@ -37,6 +37,7 @@
 #include "util/u_memory.h"
 #include "util/u_tile.h"
 #include "sp_tile_cache.h"
+#include "sp_texture.h"
 
 static struct softpipe_cached_tile *
 sp_alloc_tile(struct softpipe_tile_cache *tc);
@@ -161,6 +162,17 @@ sp_destroy_tile_cache(struct softpipe_tile_cache *tc)
 }
 
 
+static bool
+sp_tile_cache_map_layer(struct softpipe_tile_cache *tc, int layer)
+{
+   struct pipe_surface *ps = tc->surface;
+   if (!tc->transfer[layer])
+      tc->transfer_map[layer] = pipe_texture_map(tc->pipe, ps->texture,
+         ps->u.tex.level, ps->u.tex.first_layer + layer, PIPE_MAP_READ_WRITE | PIPE_MAP_UNSYNCHRONIZED,
+         0, 0, ps->width, ps->height, &tc->transfer[layer]);
+   return tc->transfer_map[layer] != NULL;
+}
+
 /**
  * Specify the surface to cache.
  */
@@ -176,7 +188,8 @@ sp_tile_cache_set_surface(struct softpipe_tile_cache *tc,
          return;
 
       for (i = 0; i < tc->num_maps; i++) {
-         pipe->texture_unmap(pipe, tc->transfer[i]);
+         if (tc->transfer[i])
+            pipe->texture_unmap(pipe, tc->transfer[i]);
          tc->transfer[i] = NULL;
          tc->transfer_map[i] = NULL;
       }
@@ -198,19 +211,12 @@ sp_tile_cache_set_surface(struct softpipe_tile_cache *tc,
       tc->clear_flags_size = (MAX_WIDTH / TILE_SIZE) * (MAX_HEIGHT / TILE_SIZE) * tc->num_maps / 32 * sizeof(uint);
       tc->clear_flags = CALLOC(1, tc->clear_flags_size);
 
-      if (ps->texture->target != PIPE_BUFFER) {
-         for (i = 0; i < tc->num_maps; i++) {
-            tc->transfer_map[i] = pipe_texture_map(pipe, ps->texture,
-                                                    ps->u.tex.level, ps->u.tex.first_layer + i,
-                                                    PIPE_MAP_READ_WRITE |
-                                                    PIPE_MAP_UNSYNCHRONIZED,
-                                                    0, 0, ps->width, ps->height,
-                                                    &tc->transfer[i]);
-         }
-      }
-      else {
-         /* can't render to buffers */
-         assert(0);
+      /* Winsys display targets can be shared with the window system. Lock
+       * them on first access and release the mapping when the tiles flush. */
+      assert(ps->texture->target != PIPE_BUFFER);
+      if (!softpipe_resource(ps->texture)->unmap_on_flush) {
+         for (i = 0; i < tc->num_maps; i++)
+            sp_tile_cache_map_layer(tc, i);
       }
 
       tc->depth_stencil = util_format_is_depth_or_stencil(ps->format);
@@ -432,8 +438,16 @@ sp_flush_tile_cache(struct softpipe_tile_cache *tc)
       if (!tc->tile)
          tc->tile = sp_alloc_tile(tc);
 
-      for (i = 0; i < tc->num_maps; i++)
+      for (i = 0; i < tc->num_maps; i++) {
+         if (!tc->transfer[i])
+            continue;
          sp_tile_cache_flush_clear(tc, i);
+         if (softpipe_resource(tc->surface->texture)->unmap_on_flush) {
+            tc->pipe->texture_unmap(tc->pipe, tc->transfer[i]);
+            tc->transfer[i] = NULL;
+            tc->transfer_map[i] = NULL;
+         }
+      }
       /* reset all clear flags to zero */
       memset(tc->clear_flags, 0, tc->clear_flags_size);
 
@@ -495,6 +509,11 @@ sp_find_cached_tile(struct softpipe_tile_cache *tc,
    if (!tile) {
       tile = sp_alloc_tile(tc);
       tc->entries[pos] = tile;
+   }
+
+   if (!sp_tile_cache_map_layer(tc, addr.bits.layer)) {
+      memset(tile, 0, sizeof(*tile));
+      return tile;
    }
 
    if (addr.value != tc->tile_addrs[pos].value) {
@@ -576,6 +595,10 @@ sp_tile_cache_clear(struct softpipe_tile_cache *tc,
 {
    uint pos;
 
+   for (int i = 0; i < tc->num_maps; i++) {
+      if (!sp_tile_cache_map_layer(tc, i))
+         return;
+   }
    tc->clear_color = *color;
 
    tc->clear_val = clearValue;

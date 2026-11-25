@@ -77,6 +77,7 @@ struct Device
    struct pipe_context *pipe;
 
    struct gdikmt_device_d3dddi device;
+   struct sw_winsys *vidmmWinsys;
 
    struct cso_context *cso;
 
@@ -187,7 +188,8 @@ struct Resource
    struct pipe_resource *resource;
    struct pipe_transfer **transfers;
    struct pipe_stream_output_target *so_target;
-   D3DKMT_HANDLE hAllocation;       /* qcdxkm C2: WDDM allocation naming the BO (0 = none) */
+   D3DKMT_HANDLE hAllocation;
+   HANDLE hRTResource;              /* The runtime handle stays with the logical resource across DXGI rotation. */
 };
 
 
@@ -450,6 +452,9 @@ void QcdxWddmTemplate(struct pipe_resource *templat);
 HRESULT QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG_CREATERESOURCE *pCreate, bool noScanout);
 bool QcdxWddmNoFlip(void);
 void QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource);
-struct pipe_resource *QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, D3DKMT_HANDLE *phAllocation);
+HRESULT QcdxWddmOpen(Device *device, const D3D10DDIARG_OPENRESOURCE *open, Resource *resource);
+HRESULT QcdxWddmFinishResource(Device *device, Resource *resource);
 HRESULT QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext);
-bool QcdxWddmEnabled(void);
+HRESULT QcdxWddmRotateVidmm(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args);
+void QcdxWddmLogInit(void);
+unsigned QcdxD3dFormat(enum pipe_format format);

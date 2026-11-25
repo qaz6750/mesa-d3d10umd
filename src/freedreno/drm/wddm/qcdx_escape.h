@@ -20,7 +20,22 @@
 #define QCDX_NR_MUNMAP 0x1002  /* struct qcdx_mmap */
 #define QCDX_NR_CAPABILITIES 0x1003 /* struct qcdx_capabilities */
 #define QCDX_NR_CANCEL_SUBMIT 0x1004
+#define QCDX_NR_DISPLAY_TRACE 0x1005
 #define QCDX_RENDER_SUBMIT 1u
+/* Full linear copy. The allocation list contains the source, then a writable
+   destination. VidMM supplies the device-specific handles and residency. */
+#define QCDX_RENDER_COPY_SURFACE 2u
+
+enum qcdx_display_event {
+    QCDX_MODE_BEGIN, QCDX_MODE_RESULT, QCDX_PRESENT_BEGIN, QCDX_PRESENT_CB,
+    QCDX_PRESENT_RESULT, QCDX_ALLOCATE_CB, QCDX_RESOLVE_SHARED, QCDX_CREATE_RESOURCE,
+    QCDX_OPEN_RESOURCE, QCDX_LOCK_CB, QCDX_UNLOCK_CB, QCDX_ROTATE, QCDX_BLT,
+    QCDX_SHARED_COPY, QCDX_DISPLAY_EVENT_COUNT
+};
+
+struct qcdx_display_trace {
+    unsigned event, allocation, detail, flags, hr;
+};
 
 struct qcdx_render_command
 {
@@ -39,6 +54,9 @@ struct qcdx_render_command
 #define QCDX_CAP_CPU_SYNC 0x10u
 #define QCDX_CAP_WDDM_ALLOCATIONS 0x20u
 #define QCDX_CAP_RENDER_REQUIRED 0x3fu
+/* VidMM-backed linear surfaces can be locked by the UMD and presented by the KMD. */
+#define QCDX_CAP_VIDMM_PRESENT 0x40u
+#define QCDX_CAP_VIDMM_COPY 0x80u
 
 struct qcdx_capabilities
 {
@@ -74,11 +92,9 @@ struct qcdx_escape
     unsigned char data[QCDX_ESC_MAX_DATA];
 };
 
-/* Allocation private driver data (D3DDDI_ALLOCATIONINFO.pPrivateDriverData), step C2: every
-   allocation the UMD creates through pfnAllocateCb (swapchain/shared/primary resources) names the
-   BO that holds its pixels; standard allocations created by Dxgkrnl (shared primary, shadow,
-   staging, GDI) get the same struct from DxgkDdiGetStandardAllocationDriverData with bo = 0 and
-   live in VidMM's aperture backing. */
+/* Allocation private data exchanged by the display miniport and user-mode driver.
+   A nonzero BO identifies Freedreno storage. A zero BO identifies a VidMM-backed
+   surface, created by either the runtime or the UMD. */
 #define QCDX_ALLOC_MAGIC 0x41475054u /* 'TPGA' */
 #define QCDX_ALLOC_UMD 0             /* kind: resource of the UMD */
 #define QCDX_ALLOC_SHAREDPRIMARY 1   /* = D3DKMDT_STANDARDALLOCATION_* */
@@ -86,6 +102,7 @@ struct qcdx_escape
 #define QCDX_ALLOC_STAGING 3
 #define QCDX_ALLOC_GDI 4
 #define QCDX_ALLOC_F_PRIMARY 0x1
+#define QCDX_ALLOC_F_SRGB 0x2
 
 struct qcdx_alloc
 {

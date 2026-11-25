@@ -1,5 +1,6 @@
 #include "gdikmt/gdikmt.h"
 #include <d3d10umddi.h>
+#include "freedreno/drm/wddm/qcdx_escape.h"
 
 struct gdikmt_device_d3dddi {  
    gdikmt_device base;
@@ -13,6 +14,7 @@ struct gdikmt_device_d3dddi {
 
    UINT allocationVidPn;
    boolean isPrimary;
+   volatile LONG displayTraceMask;
    HANDLE hRTResource;
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
@@ -28,3 +30,6 @@ struct gdikmt_context_d3dddi {
 };
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
+HRESULT QcdxCopyVidmmSurface(gdikmt_device_d3dddi *device, D3DKMT_HANDLE source, D3DKMT_HANDLE destination);
+void QcdxTraceDisplay(gdikmt_device_d3dddi *device, qcdx_display_event event,
+                      UINT allocation, UINT detail, UINT flags, HRESULT hr);

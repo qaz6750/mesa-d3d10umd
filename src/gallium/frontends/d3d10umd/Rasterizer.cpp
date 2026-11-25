@@ -506,6 +506,7 @@ SetScissorRects(D3D10DDI_HDEVICE hDevice,                            // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_scissor_state states[PIPE_MAX_VIEWPORTS];
+   const bool fixGpuScissor = !CastDevice(hDevice)->vidmmWinsys && topaz_scfix_on();
 
    ASSERT(NumScissorRects + ClearScissorRects <=
           D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
@@ -528,9 +529,9 @@ SetScissorRects(D3D10DDI_HDEVICE hDevice,                            // IN
       }
       /* qcdxkm: hardware scissor widened to whole 2x2 quads; the exact D3D scissor is applied in the PS
        * (ShaderTGSI.c, demote) so the edge pixels' quad partners stay helper lanes. */
-      if (i == 0 && topaz_scfix_on() && !topaz_fs_scissor_on())
+      if (i == 0 && fixGpuScissor && !topaz_fs_scissor_on())
          topaz_strips_save(CastDevice(hDevice), &states[0]);
-      if (topaz_fs_scissor_on() || topaz_scfix_on()) {
+      if (topaz_fs_scissor_on() || fixGpuScissor) {
          states[i].minx &= ~1u;
          states[i].miny &= ~1u;
          states[i].maxx = (states[i].maxx + 1) & ~1u;
