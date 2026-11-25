@@ -142,7 +142,7 @@ BlitTarget(pipe_resource *res)
       return nullptr;
    }
    auto *target = reinterpret_cast<VidmmSurface *>(softpipe_resource(res)->dt);
-   return target && !(target->pitch & 63) ? target : nullptr;
+   return target && !(target->pitch & 31) ? target : nullptr;
 }
 
 HRESULT
