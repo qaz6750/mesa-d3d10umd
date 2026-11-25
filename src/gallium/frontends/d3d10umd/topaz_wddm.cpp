@@ -1,7 +1,7 @@
 /*
  * A shared or presentable D3D resource has a WDDM allocation.
- * Freedreno BO imports use ExistingSysMem for
- * non-primary surfaces. DXGI presents pass the runtime allocation handles.
+ * Single-surface presents use VidMM storage with a linear Freedreno mirror.
+ * DXGI presents pass the runtime allocation handles.
  */
 
 #include <stdarg.h>
@@ -113,9 +113,14 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    struct gdikmt_createallocation opts;
    NTSTATUS st;
 
+   const bool scanout = pCreate->pPrimaryDesc && !noScanout;
+   const bool vidmm = scanout || ((pCreate->BindFlags & D3D10_DDI_BIND_PRESENT) &&
+                                  res->target == PIPE_TEXTURE_2D && res->array_size == 1 &&
+                                  res->last_level == 0 && res->nr_samples <= 1);
    memset(&wh, 0, sizeof(wh));
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
-   if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh, 0)) {
+   if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh,
+                                    vidmm ? PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE : 0)) {
       QcdxWddmLogf("topaz: resource_get_handle failed\n");
       return E_OUTOFMEMORY;
    }
@@ -131,10 +136,12 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
       return DXGI_DDI_ERR_UNSUPPORTED;
    if (util_format_is_srgb(res->format))
       a.flags |= QCDX_ALLOC_F_SRGB;
-   a.bo = (unsigned)(uintptr_t)wh.handle;
-   a.bo_offset = wh.offset;
+   if (!vidmm) {
+      a.bo = (unsigned)(uintptr_t)wh.handle;
+      a.bo_offset = wh.offset;
+   }
    a.size = wh.stride * res->height0;
-   if (pCreate->pPrimaryDesc && !noScanout) {
+   if (scanout) {
       a.flags |= QCDX_ALLOC_F_PRIMARY;
       a.vidpn = pCreate->pPrimaryDesc->VidPnSourceId;
       pDevice->device.allocationVidPn = pCreate->pPrimaryDesc->VidPnSourceId;
@@ -145,20 +152,22 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    struct qcdx_mmap memory = {};
    if (!a.size || (a.bo_offset & 4095u))
       return E_INVALIDARG;
-   memory.offset = (unsigned long long)a.bo << 12;
-   memory.size = ((unsigned long long)a.bo_offset + a.size + 4095u) & ~4095ull;
-   mapping.magic = QCDX_ESC_MAGIC;
-   mapping.nr = QCDX_NR_MMAP;
-   mapping.size = sizeof(memory);
-   mapping.ret = -1;
-   memcpy(mapping.data, &memory, sizeof(memory));
-   st = pDevice->device.base.escape(&pDevice->device.base, &mapping, sizeof(mapping));
-   if (st != STATUS_SUCCESS || mapping.ret != 0)
-      return E_OUTOFMEMORY;
-   memcpy(&memory, mapping.data, sizeof(memory));
-   if (!memory.addr)
-      return E_OUTOFMEMORY;
-   ai.pSystemMem = (const void *)(uintptr_t)(memory.addr + a.bo_offset);
+   if (!vidmm) {
+      memory.offset = (unsigned long long)a.bo << 12;
+      memory.size = ((unsigned long long)a.bo_offset + a.size + 4095u) & ~4095ull;
+      mapping.magic = QCDX_ESC_MAGIC;
+      mapping.nr = QCDX_NR_MMAP;
+      mapping.size = sizeof(memory);
+      mapping.ret = -1;
+      memcpy(mapping.data, &memory, sizeof(memory));
+      st = pDevice->device.base.escape(&pDevice->device.base, &mapping, sizeof(mapping));
+      if (st != STATUS_SUCCESS || mapping.ret != 0)
+         return E_OUTOFMEMORY;
+      memcpy(&memory, mapping.data, sizeof(memory));
+      if (!memory.addr)
+         return E_OUTOFMEMORY;
+      ai.pSystemMem = (const void *)(uintptr_t)(memory.addr + a.bo_offset);
+   }
    ai.pPrivateDriverData = &a;
    ai.PrivateDriverDataSize = sizeof(a);
    memset(&opts, 0, sizeof(opts));
@@ -166,13 +175,22 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    opts.pAllocationInfo = &ai;
    st = pDevice->device.base.createAllocation(&pDevice->device.base, &opts);
    if (st < 0) {
-      ReleaseSystemMemoryMapping(pDevice, memory.addr);
-      QcdxWddmLogf("topaz: AllocateCb failed 0x%08lx\n", (unsigned long)st);
-      return E_OUTOFMEMORY;
+      if (memory.addr) ReleaseSystemMemoryMapping(pDevice, memory.addr);
+      QcdxWddmLogf("AllocateCb failed 0x%08lx, %ux%u pitch=%u vidmm=%u primary=%u\n",
+                   (unsigned long)st, a.width, a.height, a.pitch, (unsigned)vidmm, (unsigned)scanout);
+      return static_cast<HRESULT>(st);
    }
    pResource->shared.systemMemoryMapping = memory.addr;
-   TrackSharedAllocation(pDevice, pResource, ai.hAllocation, a.bo);
+   if (vidmm) {
+      pResource->shared.vidmmPitch = a.pitch;
+      pResource->shared.gpuPitch = wh.stride;
+      pResource->shared.gpuOffset = wh.offset;
+   }
+   TrackSharedAllocation(pDevice, pResource, ai.hAllocation, (unsigned)(uintptr_t)wh.handle);
    pResource->hRTResource = pDevice->device.hRTResource;
+   if (vidmm && !scanout)
+      QcdxTraceDisplay(&pDevice->device, QCDX_CREATE_RESOURCE, ai.hAllocation,
+                       pCreate->Format, pCreate->BindFlags, S_OK);
    return S_OK;
 }
 
@@ -221,7 +239,7 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    enum pipe_format format = TopazPipeFormat(a->format);
    if (format != PIPE_FORMAT_NONE && (a->flags & QCDX_ALLOC_F_SRGB))
       format = util_format_srgb(format);
-   if (format == PIPE_FORMAT_NONE || !a->bo)
+   if (format == PIPE_FORMAT_NONE)
       return DXGI_DDI_ERR_UNSUPPORTED;
    unsigned pixelBytes = util_format_get_blocksize(format);
    if (!a->width || !a->height || a->pitch % pixelBytes || (uint64_t)a->width * pixelBytes > a->pitch ||
@@ -238,6 +256,20 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR | PIPE_BIND_SHARED;
    memset(&wh, 0, sizeof(wh));
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
+   if (!a->bo) {
+      if (a->pitch & 31) return DXGI_DDI_ERR_UNSUPPORTED;
+      resource->resource = pDevice->screen->resource_create(pDevice->screen, &templat);
+      if (!resource->resource) return E_OUTOFMEMORY;
+      if (!pDevice->screen->resource_get_handle(pDevice->screen, pDevice->pipe, resource->resource, &wh, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)) {
+         pipe_resource_reference(&resource->resource, NULL);
+         return E_OUTOFMEMORY;
+      }
+      resource->shared.vidmmPitch = a->pitch;
+      resource->shared.gpuPitch = wh.stride;
+      resource->shared.gpuOffset = wh.offset;
+      TrackSharedAllocation(pDevice, resource, info.hAllocation, (unsigned)(uintptr_t)wh.handle);
+      return S_OK;
+   }
    wh.handle = (HANDLE)(uintptr_t)a->bo;
    wh.stride = a->pitch;
    wh.offset = a->bo_offset;

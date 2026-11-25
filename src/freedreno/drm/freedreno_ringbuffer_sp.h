@@ -37,6 +37,10 @@
 
 #include "freedreno_priv.h"
 #include "freedreno_ringbuffer.h"
+#ifdef FD_WDDM
+#include "util/bitset.h"
+#include "wddm/qcdx_escape.h"
+#endif
 
 /* A "softpin" implementation of submit/ringbuffer, which lowers CPU overhead
  * by avoiding the additional tracking necessary to build cmds/relocs tables
@@ -49,6 +53,10 @@ struct fd_submit_sp {
    struct fd_submit base;
 
    DECLARE_ARRAY(struct fd_bo *, bos);
+#ifdef FD_WDDM
+   BITSET_DECLARE(resource_reads, QCDX_MAX_SUBMIT_BOS);
+   BITSET_DECLARE(resource_writes, QCDX_MAX_SUBMIT_BOS);
+#endif
 
    /* Keep a separate table of sub-alloc BOs.. the backing objects are
     * tracked in the main bos table (because this is what the kernel

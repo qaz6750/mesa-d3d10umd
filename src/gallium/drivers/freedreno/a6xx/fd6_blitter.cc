@@ -673,7 +673,7 @@ emit_blit_src(struct fd_ringbuffer *ring, const struct pipe_blit_info *info,
 template <chip CHIP>
 static void
 emit_blit_texture(struct fd_context *ctx, struct fd_ringbuffer *ring,
-                  const struct pipe_blit_info *info)
+                  const struct pipe_blit_info *info, enum a6xx_rotation rotation)
 {
    const struct pipe_box *sbox = &info->src.box;
    const struct pipe_box *dbox = &info->dst.box;
@@ -707,7 +707,7 @@ emit_blit_texture(struct fd_context *ctx, struct fd_ringbuffer *ring,
    bool mirror_x = (sx2 < sx1) != (dx2 < dx1);
    bool mirror_y = (sy2 < sy1) != (dy2 < dy1);
 
-   enum a6xx_rotation rotate = rotates[mirror_y][mirror_x];
+   enum a6xx_rotation rotate = rotation == ROTATE_0 ? rotates[mirror_y][mirror_x] : rotation;
 
    OUT_REG(ring,
            A6XX_GRAS_2D_SRC_TL_X(MIN2(sx1, sx2)),
@@ -1185,7 +1185,8 @@ FD_GENX(fd6_resolve_tile);
 
 template <chip CHIP>
 static bool
-handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
+handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info,
+                 enum a6xx_rotation rotation = ROTATE_0)
    assert_dt
 {
    struct fd_batch *batch;
@@ -1236,7 +1237,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
       /* I don't *think* we need to handle blits between buffer <-> !buffer */
       assert(info->src.resource->target != PIPE_BUFFER);
       assert(info->dst.resource->target != PIPE_BUFFER);
-      emit_blit_texture<CHIP>(ctx, batch->draw, info);
+      emit_blit_texture<CHIP>(ctx, batch->draw, info, rotation);
    }
 
    trace_end_blit(&batch->trace, batch->draw);
@@ -1464,6 +1465,20 @@ fd6_blit(struct fd_context *ctx, const struct pipe_blit_info *info) assert_dt
 
    return handle_rgba_blit<CHIP>(ctx, info);
 }
+
+#ifdef FD_WDDM
+extern "C" bool
+fd6_wddm_blit_rotated(struct pipe_context *pipe, const struct pipe_blit_info *info, unsigned turns)
+{
+   struct fd_context *ctx = fd_context(pipe);
+   if (ctx->screen->gen != A6XX || turns > 3 ||
+       info->src.resource == info->dst.resource || info->src.resource->nr_samples > 1 ||
+       util_format_is_compressed(info->src.format) || util_format_is_compressed(info->dst.format))
+      return false;
+   static const enum a6xx_rotation rotation[] = {ROTATE_0, ROTATE_90, ROTATE_180, ROTATE_270};
+   return handle_rgba_blit<A6XX>(ctx, info, rotation[turns]);
+}
+#endif
 
 template <chip CHIP>
 void

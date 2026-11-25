@@ -472,6 +472,28 @@ fd_submit_sp_destroy(struct fd_submit *submit)
    free(fd_submit);
 }
 
+#ifdef FD_WDDM
+static const struct fd_submit_funcs submit_funcs;
+
+/* Only exported Gallium resources enter the WDDM allocation list. Record
+ * their usage on the submit, since a BO can be read and written concurrently
+ * by different contexts. Leave untracked or suballocated BOs conservative. */
+void
+fd_submit_record_resource_access(struct fd_submit *submit, struct fd_bo *bo, bool write)
+{
+   if (submit->funcs != &submit_funcs || suballoc_bo(bo))
+      return;
+   struct fd_submit_sp *sp = to_fd_submit_sp(submit);
+   unsigned i = fd_submit_append_bo(sp, bo);
+   if (i < QCDX_MAX_SUBMIT_BOS) {
+      if (write)
+         BITSET_SET(sp->resource_writes, i);
+      else
+         BITSET_SET(sp->resource_reads, i);
+   }
+}
+#endif
+
 static const struct fd_submit_funcs submit_funcs = {
    .new_ringbuffer = fd_submit_sp_new_ringbuffer,
    .flush = fd_submit_sp_flush,

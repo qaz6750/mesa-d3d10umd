@@ -1103,6 +1103,11 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
    struct fd_resource *rsc = fd_resource(prsc);
 
    rsc->b.is_shared = true;
+#ifdef FD_WDDM
+   /* The KMD populates a linear VidMM mirror before the first GPU read. */
+   if (usage & PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)
+      rsc->valid = true;
+#endif
 
    if (prsc->target == PIPE_BUFFER)
       tc_buffer_disable_cpu_storage(&rsc->b.b);

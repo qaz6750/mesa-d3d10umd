@@ -191,6 +191,44 @@ subResourceBox(struct pipe_resource *resource, // IN
  * ----------------------------------------------------------------------
  */
 
+static HRESULT
+LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
+{
+   if (resource->vidmmLocked || !device->device.KTCallbacks.pfnLockCb ||
+       !device->device.KTCallbacks.pfnUnlockCb)
+      return E_INVALIDARG;
+   struct pipe_fence_handle *fence = NULL;
+   device->pipe->flush(device->pipe, &fence, 0);
+   if (!fence) return E_FAIL;
+   bool ready = device->screen->fence_finish(device->screen, device->pipe, fence,
+                                             doNotWait ? 0 : UINT64_MAX);
+   device->screen->fence_reference(device->screen, &fence, NULL);
+   if (!ready) return doNotWait ? DXGI_ERROR_WAS_STILL_DRAWING : E_FAIL;
+   D3DDDICB_LOCK lock = {};
+   lock.hAllocation = resource->shared.handle;
+   lock.Flags.LockEntire = TRUE;
+   lock.Flags.ReadOnly = mode == D3D10_DDI_MAP_READ;
+   lock.Flags.WriteOnly = mode != D3D10_DDI_MAP_READ && mode != D3D10_DDI_MAP_READWRITE;
+   lock.Flags.DonotWait = doNotWait;
+   HRESULT hr = device->device.KTCallbacks.pfnLockCb(device->device.hRTDevice, &lock);
+   if (SUCCEEDED(hr)) {
+      resource->vidmmLocked = true;
+      *data = lock.pData;
+   }
+   return hr;
+}
+
+static HRESULT
+UnlockVidmm(Device *device, Resource *resource)
+{
+   D3DDDICB_UNLOCK unlock = {};
+   unlock.NumAllocations = 1;
+   unlock.phAllocations = &resource->shared.handle;
+   HRESULT hr = device->device.KTCallbacks.pfnUnlockCb(device->device.hRTDevice, &unlock);
+   if (SUCCEEDED(hr)) resource->vidmmLocked = false;
+   return hr;
+}
+
 void APIENTRY
 CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                __in const D3D10DDIARG_CREATERESOURCE *pCreateResource,  // IN
@@ -269,7 +307,13 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       SetErrorAt(hDevice, hr, "CreateResource", line);
    };
    bool topazNoScanout = false;
-   if (pCreateResource->pPrimaryDesc) {
+   bool displayFormat = pCreateResource->Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                        pCreateResource->Format == DXGI_FORMAT_B8G8R8X8_UNORM ||
+                        pCreateResource->Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                        pCreateResource->Format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+   if (primary && (!displayFormat || pCreateResource->MipLevels != 1 || pCreateResource->ArraySize != 1 ||
+                   pCreateResource->ResourceDimension != D3D10DDIRESOURCE_TEXTURE2D ||
+                   pCreateResource->SampleDesc.Count != 1)) {
       pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       if (!(pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
          QcdxWddmLogf("  primary without PRIMARY_OPTIONAL -> DXGI_DDI_ERR_UNSUPPORTED (no-flip mode)\n");
@@ -371,7 +415,26 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       }
    }
 
-   if (pCreateResource->pInitialDataUP) {
+   if (pCreateResource->pInitialDataUP && pResource->shared.vidmmPitch) {
+      void *pixels = NULL;
+      HRESULT hr = LockVidmm(device, pResource, D3D10_DDI_MAP_WRITE, false, &pixels);
+      if (SUCCEEDED(hr)) {
+         const auto &input = pCreateResource->pInitialDataUP[0];
+         util_copy_rect((uint8_t *)pixels, templat.format, pResource->shared.vidmmPitch, 0, 0,
+                        templat.width0, templat.height0, (const uint8_t *)input.pSysMem,
+                        input.SysMemPitch, 0, 0);
+         hr = UnlockVidmm(device, pResource);
+      }
+      if (FAILED(hr)) {
+         if (pResource->vidmmLocked) UnlockVidmm(device, pResource);
+         QcdxWddmDestroyAllocation(device, pResource);
+         pipe_resource_reference(&pResource->resource, NULL);
+         free(pResource->transfers);
+         pResource->transfers = NULL;
+         pResource->NumSubResources = 0;
+         reportError(hr, __LINE__);
+      }
+   } else if (pCreateResource->pInitialDataUP) {
       if (pResource->buffer) {
          assert(pResource->NumSubResources == 1);
          const D3D10_DDIARG_SUBRESOURCE_UP* pInitialDataUP =
@@ -565,6 +628,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       }
    }
    free(pResource->transfers);
+   if (pResource->vidmmLocked) SetError(hDevice, UnlockVidmm(CastDevice(hDevice), pResource));
 
    if (pResource->shared.handle) {
       HRESULT hr = QcdxWddmFinishResource(CastDevice(hDevice), pResource);
@@ -599,6 +663,18 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
    struct pipe_resource *resource = pResource->resource;
+
+   if (pResource->shared.vidmmPitch) {
+      *pMappedSubResource = {};
+      HRESULT hr = SubResource ? E_INVALIDARG :
+         LockVidmm(CastDevice(hDevice), pResource, DDIMap, (Flags & D3D10_DDI_MAP_FLAG_DONOTWAIT) != 0,
+                   &pMappedSubResource->pData);
+      if (SUCCEEDED(hr)) {
+         pMappedSubResource->RowPitch = pResource->shared.vidmmPitch;
+         pMappedSubResource->DepthPitch = pResource->shared.vidmmPitch * resource->height0;
+      } else SetError(hDevice, hr);
+      return;
+   }
 
    unsigned usage;
    switch (DDIMap) {
@@ -735,6 +811,10 @@ ResourceUnmap(D3D10DDI_HDEVICE hDevice,      // IN
 
    assert(SubResource < pResource->NumSubResources);
 
+   if (pResource->vidmmLocked) {
+      SetError(hDevice, UnlockVidmm(CastDevice(hDevice), pResource));
+      return;
+   }
    if (pResource->transfers[SubResource]) {
       if (pResource->buffer) {
          pipe_buffer_unmap(pipe, pResource->transfers[SubResource]);
@@ -1060,6 +1140,18 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       box.depth  = pDstBox->back   - pDstBox->front;
    } else {
       subResourceBox(dst_resource, DstSubResource, &level, &box);
+   }
+
+   if (pDstResource->shared.vidmmPitch) {
+      void *pixels = NULL;
+      HRESULT hr = LockVidmm(pDevice, pDstResource, D3D10_DDI_MAP_WRITE, false, &pixels);
+      if (SUCCEEDED(hr)) {
+         util_copy_rect((uint8_t *)pixels, dst_resource->format, pDstResource->shared.vidmmPitch,
+                        box.x, box.y, box.width, box.height, (const uint8_t *)pSysMemUP, RowPitch, 0, 0);
+         hr = UnlockVidmm(pDevice, pDstResource);
+      }
+      if (FAILED(hr)) SetError(hDevice, hr);
+      return;
    }
 
    struct pipe_transfer *transfer;

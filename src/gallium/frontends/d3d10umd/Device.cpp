@@ -182,6 +182,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base);
    if (!screen) {
+      QcdxTraceDisplay(&pDevice->device, QCDX_CREATE_DEVICE, 0, pCreateData->Interface, 1, DXGI_ERROR_UNSUPPORTED);
       QcdxWddmLogf("CreateDevice DDI=0x%x: backend initialization failed\n", pCreateData->Interface);
       ReleaseDeviceBackend(pDevice);
       return DXGI_ERROR_UNSUPPORTED;
@@ -192,6 +193,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (pipe)
       pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
    if (!pDevice->cso) {
+      QcdxTraceDisplay(&pDevice->device, QCDX_CREATE_DEVICE, 0, pCreateData->Interface, 2, E_OUTOFMEMORY);
       ReleaseDeviceBackend(pDevice);
       return E_OUTOFMEMORY;
    }
@@ -201,6 +203,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->dss = NULL;              /* qcdxkm: current depth-stencil state */   /* qcdxkm: bind (empty) vertex elements before the first draw */
    pDevice->empty_fs = CreateEmptyShader(pDevice, PIPE_SHADER_FRAGMENT);
    if (!pDevice->empty_vs || !pDevice->empty_fs) {
+      QcdxTraceDisplay(&pDevice->device, QCDX_CREATE_DEVICE, 0, pCreateData->Interface, 3, E_OUTOFMEMORY);
       ReleaseInitialStates(pDevice);
       ReleaseDeviceBackend(pDevice);
       return E_OUTOFMEMORY;
@@ -363,6 +366,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (IS_DXGI1_1_BASE_FUNCTIONS(pCreateData->Interface, pCreateData->Version))
       pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions2->pfnResolveSharedResource = _ResolveSharedResource;
 
+   QcdxTraceDisplay(&pDevice->device, QCDX_CREATE_DEVICE, 0, pCreateData->Interface, 4, S_OK);
    QcdxWddmLogf("CreateDevice DDI=0x%x backend=%s\n", pCreateData->Interface,
                 screen->get_name(screen));
    return S_OK;

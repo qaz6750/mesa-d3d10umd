@@ -229,7 +229,7 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
    for (UINT i = 0; i < count; ++i) {
       Resource *r = CastResource(args->pResources[i]);
       if (!r || !r->resource || !r->shared.handle || r->NumSubResources != 1 ||
-          !r->transfers || r->transfers[0] || r->resource->target != PIPE_TEXTURE_2D ||
+          !r->transfers || r->transfers[0] || r->vidmmLocked || r->resource->target != PIPE_TEXTURE_2D ||
           r->resource->screen != first->resource->screen || r->resource->nr_samples != first->resource->nr_samples ||
           r->resource->format != first->resource->format || r->resource->width0 != first->resource->width0 ||
           r->resource->height0 != first->resource->height0)
@@ -256,18 +256,24 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
    AcquireSRWLockExclusive(&device->device.qcdxSubmitLock);
    D3DKMT_HANDLE firstHandle = first->shared.handle;
    unsigned firstBo = first->shared.boName;
-   uint64_t firstMapping = first->shared.systemMemoryMapping;
+   auto firstStorage = first->shared;
    for (UINT i = 1; i < count; ++i) {
       Resource *left = CastResource(args->pResources[i - 1]);
       Resource *right = CastResource(args->pResources[i]);
       left->shared.handle = right->shared.handle;
       left->shared.boName = right->shared.boName;
+      left->shared.vidmmPitch = right->shared.vidmmPitch;
+      left->shared.gpuPitch = right->shared.gpuPitch;
+      left->shared.gpuOffset = right->shared.gpuOffset;
       left->shared.systemMemoryMapping = right->shared.systemMemoryMapping;
    }
    Resource *last = CastResource(args->pResources[count - 1]);
    last->shared.handle = firstHandle;
    last->shared.boName = firstBo;
-   last->shared.systemMemoryMapping = firstMapping;
+   last->shared.vidmmPitch = firstStorage.vidmmPitch;
+   last->shared.gpuPitch = firstStorage.gpuPitch;
+   last->shared.gpuOffset = firstStorage.gpuOffset;
+   last->shared.systemMemoryMapping = firstStorage.systemMemoryMapping;
    ReleaseSRWLockExclusive(&device->device.qcdxSubmitLock);
    return S_OK;
 }
@@ -300,77 +306,8 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
  * ----------------------------------------------------------------------
  */
 
-static HRESULT
-CopyBltPixels(struct pipe_context *pipe, const struct pipe_blit_info &blit,
-              DXGI_DDI_MODE_ROTATION rotation, bool mayAlias)
-{
-   struct pipe_transfer *srcTransfer = NULL, *dstTransfer = NULL;
-   const uint8_t *src = static_cast<const uint8_t *>(pipe->texture_map(pipe, blit.src.resource,
-      blit.src.level, PIPE_MAP_READ, &blit.src.box, &srcTransfer));
-   if (!src)
-      return E_FAIL;
-
-   const ptrdiff_t pixel = util_format_get_blocksize(blit.dst.format);
-   const size_t rowBytes = util_format_get_stride(blit.src.format, blit.src.box.width);
-   const unsigned rows = util_format_get_nblocksy(blit.src.format, blit.src.box.height);
-   ptrdiff_t stride = srcTransfer->stride;
-   uint8_t *snapshot = NULL;
-   if (mayAlias) {
-      // Distinct KMT handles can open the same allocation. Finish reading before
-      // locking its destination so a write cannot overwrite unread texels.
-      snapshot = static_cast<uint8_t *>(calloc(rows, rowBytes));
-      if (snapshot) {
-         for (unsigned y = 0; y < rows; ++y)
-            memcpy(snapshot + y * rowBytes, src + y * stride, rowBytes);
-      }
-      pipe_texture_unmap(pipe, srcTransfer);
-      srcTransfer = NULL;
-      if (!snapshot)
-         return E_OUTOFMEMORY;
-      src = snapshot;
-      stride = rowBytes;
-   }
-   uint8_t *dst = static_cast<uint8_t *>(pipe->texture_map(pipe, blit.dst.resource,
-      blit.dst.level, PIPE_MAP_WRITE, &blit.dst.box, &dstTransfer));
-   if (!dst) {
-      if (srcTransfer)
-         pipe_texture_unmap(pipe, srcTransfer);
-      free(snapshot);
-      return E_FAIL;
-   }
-
-   const ptrdiff_t lastRow = (blit.src.box.height - 1) * stride;
-   const ptrdiff_t lastCol = (blit.src.box.width - 1) * pixel;
-   ptrdiff_t stepX = pixel, stepY = stride;
-   if (rotation == DXGI_DDI_MODE_ROTATION_ROTATE90) {
-      src += lastRow;
-      stepX = -stride;
-      stepY = pixel;
-   } else if (rotation == DXGI_DDI_MODE_ROTATION_ROTATE180) {
-      src += lastRow + lastCol;
-      stepX = -pixel;
-      stepY = -stride;
-   } else if (rotation == DXGI_DDI_MODE_ROTATION_ROTATE270) {
-      src += lastCol;
-      stepX = stride;
-      stepY = -pixel;
-   }
-   const unsigned dstRows = util_format_get_nblocksy(blit.dst.format, blit.dst.box.height);
-   for (unsigned y = 0; y < dstRows; ++y) {
-      const uint8_t *srcRow = src + y * stepY;
-      uint8_t *dstRow = dst + (size_t)y * dstTransfer->stride;
-      if (rotation <= DXGI_DDI_MODE_ROTATION_IDENTITY)
-         memcpy(dstRow, srcRow, rowBytes);
-      else
-         for (int x = 0; x < blit.dst.box.width; ++x)
-            memcpy(dstRow + x * pixel, srcRow + x * stepX, pixel);
-   }
-   pipe_texture_unmap(pipe, dstTransfer);
-   if (srcTransfer)
-      pipe_texture_unmap(pipe, srcTransfer);
-   free(snapshot);
-   return S_OK;
-}
+extern "C" bool fd6_wddm_blit_rotated(struct pipe_context *pipe, const struct pipe_blit_info *info,
+                                       unsigned turns);
 
 static HRESULT
 BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BLT *Blt)
@@ -429,46 +366,46 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
       if (FAILED(hr))
          return hr;
    }
-   if (blit.src.format == blit.dst.format && blit.src.box.width == width && blit.src.box.height == height &&
-       !Blt->Flags.Resolve && (!rotated || blit.src.resource->nr_samples <= 1)) {
-      if (rotated || mayAlias)
-         return CopyBltPixels(device->pipe, blit, Blt->Rotate, mayAlias);
+   const bool simple = blit.src.format == blit.dst.format && blit.src.box.width == width &&
+                       blit.src.box.height == height && !Blt->Flags.Resolve;
+   blit.mask = PIPE_MASK_RGBA;
+   blit.filter = Blt->Flags.Stretch ? PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
+   if (simple && !mayAlias && !rotated) {
       device->pipe->resource_copy_region(device->pipe, blit.dst.resource, blit.dst.level,
          blit.dst.box.x, blit.dst.box.y, blit.dst.box.z, blit.src.resource, blit.src.level, &blit.src.box);
-   } else {
-      if (!device->screen->is_format_supported(device->screen, blit.src.format, blit.src.resource->target,
-             blit.src.resource->nr_samples, blit.src.resource->nr_storage_samples, PIPE_BIND_SAMPLER_VIEW) ||
-          !device->screen->is_format_supported(device->screen, blit.dst.format, blit.dst.resource->target,
-             blit.dst.resource->nr_samples, blit.dst.resource->nr_storage_samples, PIPE_BIND_RENDER_TARGET))
-         return DXGI_DDI_ERR_UNSUPPORTED;
-      blit.mask = PIPE_MASK_RGBA;
-      blit.filter = Blt->Flags.Stretch ? PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
-      if (rotated || mayAlias) {
-         // A separate render target supports both the final rotation and
-         // reading every source texel before touching an aliased destination.
-         struct pipe_resource desc = {};
-         desc.target = PIPE_TEXTURE_2D;
-         desc.format = blit.dst.format;
-         desc.width0 = width;
-         desc.height0 = height;
-         desc.depth0 = desc.array_size = 1;
-         desc.bind = PIPE_BIND_RENDER_TARGET;
-         struct pipe_resource *scratch = device->screen->resource_create(device->screen, &desc);
-         if (!scratch)
-            return E_OUTOFMEMORY;
-         struct pipe_blit_info scaled = blit;
-         scaled.dst.resource = scratch;
-         scaled.dst.level = 0;
-         u_box_2d(0, 0, width, height, &scaled.dst.box);
-         device->pipe->blit(device->pipe, &scaled);
-         blit.src = scaled.dst;
-         HRESULT hr = CopyBltPixels(device->pipe, blit, Blt->Rotate, false);
-         pipe_resource_reference(&scratch, NULL);
-         return hr;
-      }
-      device->pipe->blit(device->pipe, &blit);
+      return S_OK;
    }
-   return S_OK;
+   if (!device->screen->is_format_supported(device->screen, blit.src.format, blit.src.resource->target,
+          blit.src.resource->nr_samples, blit.src.resource->nr_storage_samples, PIPE_BIND_SAMPLER_VIEW) ||
+       !device->screen->is_format_supported(device->screen, blit.dst.format, blit.dst.resource->target,
+          blit.dst.resource->nr_samples, blit.dst.resource->nr_storage_samples, PIPE_BIND_RENDER_TARGET))
+      return DXGI_DDI_ERR_UNSUPPORTED;
+
+   struct pipe_resource *scratch = NULL;
+   if (mayAlias || (rotated && !simple)) {
+      struct pipe_resource desc = {};
+      desc.target = PIPE_TEXTURE_2D;
+      desc.format = blit.dst.format;
+      desc.width0 = width;
+      desc.height0 = height;
+      desc.depth0 = desc.array_size = 1;
+      desc.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
+      scratch = device->screen->resource_create(device->screen, &desc);
+      if (!scratch) return E_OUTOFMEMORY;
+      struct pipe_blit_info scaled = blit;
+      scaled.dst.resource = scratch;
+      scaled.dst.level = 0;
+      u_box_2d(0, 0, width, height, &scaled.dst.box);
+      device->pipe->blit(device->pipe, &scaled);
+      blit.src = scaled.dst;
+   }
+   bool ok = true;
+   if (rotated)
+      ok = fd6_wddm_blit_rotated(device->pipe, &blit, Blt->Rotate - DXGI_DDI_MODE_ROTATION_IDENTITY);
+   else
+      device->pipe->blit(device->pipe, &blit);
+   pipe_resource_reference(&scratch, NULL);
+   return ok ? S_OK : DXGI_DDI_ERR_UNSUPPORTED;
 }
 
 HRESULT APIENTRY

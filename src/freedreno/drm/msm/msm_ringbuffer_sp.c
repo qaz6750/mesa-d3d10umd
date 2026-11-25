@@ -95,7 +95,20 @@ flush_submit_list(struct list_head *submit_list)
           * submit being merged, we expect to hit the fast-path as we add it
           * to the current submit:
           */
+#ifdef FD_WDDM
+         unsigned before = fd_submit->nr_bos;
+         unsigned dst = fd_submit_append_bo(fd_submit, fd_deferred_submit->bos[i]);
+         if (dst < QCDX_MAX_SUBMIT_BOS) {
+            bool read = i < QCDX_MAX_SUBMIT_BOS && BITSET_TEST(fd_deferred_submit->resource_reads, i);
+            bool write = !read || BITSET_TEST(fd_deferred_submit->resource_writes, i);
+            if (write || (dst < before && !BITSET_TEST(fd_submit->resource_reads, dst)))
+               BITSET_SET(fd_submit->resource_writes, dst);
+            if (read)
+               BITSET_SET(fd_submit->resource_reads, dst);
+         }
+#else
          fd_submit_append_bo(fd_submit, fd_deferred_submit->bos[i]);
+#endif
       }
 
       /* Now that the cmds/bos have been transfered over to the current submit,
@@ -136,6 +149,11 @@ flush_submit_list(struct list_head *submit_list)
 
    for (unsigned i = 0; i < fd_submit->nr_bos; i++) {
       submit_bos[i].flags = msm_submit_bo_flags(fd_submit->bos[i]);
+#ifdef FD_WDDM
+      if (i < QCDX_MAX_SUBMIT_BOS && BITSET_TEST(fd_submit->resource_reads, i) &&
+          !BITSET_TEST(fd_submit->resource_writes, i))
+         submit_bos[i].flags &= ~MSM_SUBMIT_BO_WRITE;
+#endif
       submit_bos[i].handle = fd_submit->bos[i]->handle;
       submit_bos[i].presumed = 0;
    }

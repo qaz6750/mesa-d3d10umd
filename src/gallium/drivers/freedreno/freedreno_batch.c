@@ -520,6 +520,10 @@ fd_batch_resource_write(struct fd_batch *batch, struct fd_resource *rsc)
    fd_screen_assert_locked(batch->ctx->screen);
 
    DBG("%p: write %p", batch, rsc);
+#ifdef FD_WDDM
+   if (rsc->b.is_shared)
+      fd_submit_record_resource_access(batch->submit, rsc->bo, true);
+#endif
 
    /* Must do this before the early out, so we unset a previous resource
     * invalidate (which may have left the write_batch state in place).
@@ -587,6 +591,10 @@ fd_batch_resource_read_slowpath(struct fd_batch *batch, struct fd_resource *rsc)
       fd_batch_resource_read(batch, rsc->stencil);
 
    DBG("%p: read %p", batch, rsc);
+#ifdef FD_WDDM
+   if (rsc->b.is_shared)
+      fd_submit_record_resource_access(batch->submit, rsc->bo, false);
+#endif
 
    struct fd_resource_tracking *track = rsc->track;
 

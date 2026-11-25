@@ -48,8 +48,10 @@ BuildAllocationList(struct gdikmt_device_d3dddi *device, gdikmt_context *context
    auto *buffers = reinterpret_cast<const drm_msm_gem_submit_bo *>((uintptr_t)batch->bos);
    list_for_each_entry(qcdx_shared_allocation, allocation, &device->sharedAllocations, link) {
       bool used = false, write = false;
+      unsigned bufferIndex = 0;
       for (unsigned i = 0; i < batch->nr_bos; ++i) {
          if (buffers[i].handle == allocation->boName) {
+            bufferIndex = i;
             used = true;
             write |= (buffers[i].flags & MSM_SUBMIT_BO_WRITE) != 0;
          }
@@ -68,6 +70,17 @@ BuildAllocationList(struct gdikmt_device_d3dddi *device, gdikmt_context *context
          ++render->AllocationCount;
       }
       context->pAllocationList[index].WriteOperation |= write;
+      if (allocation->vidmmPitch) {
+         if (context->CommandBufferSize - render->CommandLength < sizeof(qcdx_vidmm_operand))
+            return STATUS_NO_MEMORY;
+         qcdx_vidmm_operand operand = {index, bufferIndex, allocation->gpuPitch, allocation->gpuOffset};
+         char *bytes = static_cast<char *>(context->pCommandBuffer);
+         memcpy(bytes + render->CommandLength, &operand, sizeof(operand));
+         render->CommandLength += sizeof(operand);
+         auto *ticket = reinterpret_cast<qcdx_render_command *>(bytes);
+         ticket->operation = QCDX_RENDER_SUBMIT_VIDMM;
+         ++ticket->reserved;
+      }
    }
    return STATUS_SUCCESS;
 }

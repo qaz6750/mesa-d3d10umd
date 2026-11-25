@@ -28,12 +28,20 @@
 /* Full native 32-bit fill. One writable allocation, color in the last dword. */
 #define QCDX_RENDER_FILL_SURFACE 3u
 #define QCDX_RENDER_COPY_REGION 4u
+#define QCDX_RENDER_SUBMIT_VIDMM 5u
+
+/* Submitted after a render ticket for a linear VidMM-owned surface. The
+   runtime supplies the allocation handle and access rights separately. */
+#define QCDX_MAX_SUBMIT_BOS 1024u
+struct qcdx_vidmm_operand {
+    unsigned allocation_index, buffer_index, pitch, offset;
+};
 
 enum qcdx_display_event {
     QCDX_MODE_BEGIN, QCDX_MODE_RESULT, QCDX_PRESENT_BEGIN, QCDX_PRESENT_CB,
     QCDX_PRESENT_RESULT, QCDX_ALLOCATE_CB, QCDX_RESOLVE_SHARED, QCDX_CREATE_RESOURCE,
     QCDX_OPEN_RESOURCE, QCDX_LOCK_CB, QCDX_UNLOCK_CB, QCDX_ROTATE, QCDX_BLT,
-    QCDX_SHARED_COPY, QCDX_DISPLAY_EVENT_COUNT
+    QCDX_SHARED_COPY, QCDX_CREATE_DEVICE, QCDX_DISPLAY_EVENT_COUNT
 };
 
 struct qcdx_display_trace {

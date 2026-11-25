@@ -7,6 +7,8 @@ struct qcdx_shared_allocation {
    list_head link;
    D3DKMT_HANDLE handle;
    unsigned boName;
+   unsigned vidmmPitch; /* Nonzero for canonical VidMM storage. */
+   unsigned gpuPitch, gpuOffset;
    uint64_t systemMemoryMapping; /* Creator mapping passed to AllocateCb. */
 };
 

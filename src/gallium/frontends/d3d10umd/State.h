@@ -193,6 +193,7 @@ struct Resource
    struct pipe_transfer **transfers;
    struct pipe_stream_output_target *so_target;
    qcdx_shared_allocation shared;
+   bool vidmmLocked;
    HANDLE hRTResource;              /* The runtime handle stays with the logical resource across DXGI rotation. */
 };
 

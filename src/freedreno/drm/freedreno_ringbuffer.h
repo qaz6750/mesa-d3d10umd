@@ -79,6 +79,9 @@ enum fd_ringbuffer_flags {
  * non-STREAMING stateobj rb's, rb's are allocated from the submit.
  */
 struct fd_submit *fd_submit_new(struct fd_pipe *pipe);
+#ifdef FD_WDDM
+void fd_submit_record_resource_access(struct fd_submit *submit, struct fd_bo *bo, bool write);
+#endif
 
 /* NOTE: all ringbuffer's create from the submit should be unref'd
  * before destroying the submit.
