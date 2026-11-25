@@ -161,6 +161,9 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
 
    Device *pDevice = CastDevice(pCreateData->hDrvDevice);
    memset(pDevice, 0, sizeof *pDevice);
+   const char *timing = getenv("QCDX_TIMING");
+   if (timing && timing[0] == '1')
+      QueryPerformanceFrequency(&pDevice->timing.frequency);
 
    pDevice->device.hRTAdapter = (HANDLE)pAdapter->hRTAdapter;
    pDevice->device.hRTDevice = (HANDLE)pCreateData->hRTDevice.handle;

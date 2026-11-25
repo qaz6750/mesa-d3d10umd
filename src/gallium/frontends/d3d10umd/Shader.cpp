@@ -1066,7 +1066,6 @@ PsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    struct pipe_context *pipe = pDevice->pipe;
    void *state = CastPipeShader(hShader);
 
-   g_topazPsTokens = CastShader(hShader) ? (const void *)CastShader(hShader)->state.tokens : NULL;   /* qcdxkm: logs */
    if (!state) {
       state = pDevice->empty_fs;
    }

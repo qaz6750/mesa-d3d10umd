@@ -32,10 +32,6 @@
 
 
 #include "Resource.h"
-unsigned g_topazMapFlushes;   /* qcdxkm: TIMING stats */
-long long g_topazMapFlushTicks;
-long long g_topazDrawTicks;
-unsigned g_topazDrawCount;
 extern "C" void fd_resource_debug_state(struct pipe_resource *prsc, void **bo, unsigned *batch_mask, int *write_batch, int *busy);
 #include "Format.h"
 #include "State.h"
@@ -606,6 +602,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
 {
    LOG_ENTRYPOINT();
 
+   PresentTiming &timing = CastDevice(hDevice)->timing;
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Resource *pResource = CastResource(hResource);
    struct pipe_resource *resource = pResource->resource;
@@ -627,7 +624,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
        * pending draws not tracked by freedreno, so DISCARD writes in place?) */
       if ((resource->bind & PIPE_BIND_CONSTANT_BUFFER) && getenv("QCDX_CBFLUSH") && getenv("QCDX_CBFLUSH")[0] == '1') {
          pipe->flush(pipe, NULL, 0);
-         g_topazMapFlushes++;
+         if (timing.frequency.QuadPart) ++timing.mapFlushes;
       }
       if (resource->last_level == 0 && resource->array_size == 1) {
          usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
@@ -651,12 +648,14 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
              (m == '3' && (resource->bind & PIPE_BIND_VERTEX_BUFFER)) ||
              (m == '4' && (resource->bind & PIPE_BIND_INDEX_BUFFER)))
          {
-            LARGE_INTEGER a, b2;
-            QueryPerformanceCounter(&a);
+            LARGE_INTEGER start, end;
+            if (timing.frequency.QuadPart) QueryPerformanceCounter(&start);
             pipe->flush(pipe, NULL, 0);
-            QueryPerformanceCounter(&b2);
-            g_topazMapFlushTicks += b2.QuadPart - a.QuadPart;
-            g_topazMapFlushes++;
+            if (timing.frequency.QuadPart) {
+               QueryPerformanceCounter(&end);
+               timing.mapFlushTicks += end.QuadPart - start.QuadPart;
+               ++timing.mapFlushes;
+            }
          }
       }
       break;
@@ -963,7 +962,6 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
                                 src_resource, src_level,
                                 &src_box);
    }
-   TopazProbeAfterCopy(pDevice);
 }
 
 
@@ -1100,7 +1098,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       if ((m == '1' && (dst_resource->bind & PIPE_BIND_CONSTANT_BUFFER)) ||
           (m == '2' && pDstResource->buffer) || m == '3') {
          pipe->flush(pipe, NULL, 0);
-         g_topazMapFlushes++;
+         if (pDevice->timing.frequency.QuadPart) ++pDevice->timing.mapFlushes;
       }
    }
    if (!pDstResource->buffer && getenv("QCDX_UPDSYNC") && getenv("QCDX_UPDSYNC")[0] == '1')

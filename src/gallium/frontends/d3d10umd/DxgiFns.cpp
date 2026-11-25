@@ -78,7 +78,6 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    if (pSrcResource && pSrcResource->hAllocation) {
       TopazStripsRestore(device);
       TopazMaybeDump(device->pipe, pSrcResource->resource);
-      TopazProbePresent();
       HRESULT hr = QcdxWddmPresent(device, pSrcResource, pDst, pPresentData->pDXGIContext);
       QcdxTraceDisplay(&device->device, QCDX_PRESENT_RESULT, src, dst, pPresentData->Flags.Value, hr);
       static unsigned n;

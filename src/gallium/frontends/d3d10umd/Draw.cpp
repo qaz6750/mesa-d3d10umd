@@ -41,8 +41,26 @@
 #include "util/u_memory.h"
 
 static int g_topazMapLog = -1;
-extern long long g_topazDrawTicks;
-extern unsigned g_topazDrawCount;   /* qcdxkm: QCDX_MAPLOG ring tracing */
+/* Record timings only for devices created with QCDX_TIMING. */
+class DrawTimer {
+public:
+   explicit DrawTimer(PresentTiming &timing) : timing(timing) {
+      if (timing.frequency.QuadPart)
+         QueryPerformanceCounter(&start);
+   }
+   ~DrawTimer() {
+      if (timing.frequency.QuadPart) {
+         LARGE_INTEGER end;
+         QueryPerformanceCounter(&end);
+         timing.drawTicks += end.QuadPart - start.QuadPart;
+         ++timing.draws;
+      }
+   }
+private:
+   PresentTiming &timing;
+   LARGE_INTEGER start;
+};
+
 
 static unsigned
 ClampedUAdd(unsigned a,
@@ -166,7 +184,7 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
    if (g_topazMapLog < 0) g_topazMapLog = getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1';
    if (g_topazMapLog)
       QcdxWddmLogf("RING Draw vb %p start %u count %u\n", (void *)pDevice->vertex_buffers[0].buffer.resource, StartVertexLocation, VertexCount);
-   LARGE_INTEGER topazT0; QueryPerformanceCounter(&topazT0);
+   DrawTimer timer(pDevice->timing);
    TopazLogDraw("Draw", VertexCount, pDevice, pDevice->fb.cbufs[0] ? (void *)pDevice->fb.cbufs[0]->texture : NULL, pDevice->fb.width, pDevice->fb.height);
 
    ResolveState(pDevice);
@@ -176,8 +194,6 @@ Draw(D3D10DDI_HDEVICE hDevice,   // IN
                     pDevice->primitive,
                     StartVertexLocation,
                     VertexCount);
-   { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_topazDrawTicks += t1.QuadPart - topazT0.QuadPart; g_topazDrawCount++; }
-   TopazAfterDraw(pDevice);
 }
 
 
@@ -204,7 +220,7 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
    if (g_topazMapLog)
       QcdxWddmLogf("RING DrawIndexed vb %p ib %p start %u count %u base %d\n", (void *)pDevice->vertex_buffers[0].buffer.resource,
                     (void *)pDevice->index_buffer, StartIndexLocation, IndexCount, BaseVertexLocation);
-   LARGE_INTEGER topazT0; QueryPerformanceCounter(&topazT0);
+   DrawTimer timer(pDevice->timing);
    TopazLogDraw("DrawIndexed", IndexCount, pDevice, pDevice->fb.cbufs[0] ? (void *)pDevice->fb.cbufs[0]->texture : NULL, pDevice->fb.width, pDevice->fb.height);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
@@ -236,8 +252,6 @@ DrawIndexed(D3D10DDI_HDEVICE hDevice,  // IN
    info.restart_index = restart_index;
 
    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
-   { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_topazDrawTicks += t1.QuadPart - topazT0.QuadPart; g_topazDrawCount++; }
-   TopazAfterDraw(pDevice);
 
    if (null_ib) {
       pipe_resource_reference(&null_ib, NULL);
@@ -266,7 +280,7 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
-   LARGE_INTEGER topazT0; QueryPerformanceCounter(&topazT0);
+   DrawTimer timer(pDevice->timing);
    TopazLogDraw("DrawInstanced", VertexCountPerInstance * InstanceCount, pDevice, pDevice->fb.cbufs[0] ? (void *)pDevice->fb.cbufs[0]->texture : NULL, pDevice->fb.width, pDevice->fb.height);
 
    if (!InstanceCount) {
@@ -282,8 +296,6 @@ DrawInstanced(D3D10DDI_HDEVICE hDevice,      // IN
                               VertexCountPerInstance,
                               StartInstanceLocation,
                               InstanceCount);
-   { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_topazDrawTicks += t1.QuadPart - topazT0.QuadPart; g_topazDrawCount++; }
-   TopazAfterDraw(pDevice);
 }
 
 
@@ -309,7 +321,7 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
-   LARGE_INTEGER topazT0; QueryPerformanceCounter(&topazT0);
+   DrawTimer timer(pDevice->timing);
    TopazLogDraw("DrawIndexedInstanced", IndexCountPerInstance * InstanceCount, pDevice, pDevice->fb.cbufs[0] ? (void *)pDevice->fb.cbufs[0]->texture : NULL, pDevice->fb.width, pDevice->fb.height);
    struct pipe_draw_info info;
    struct pipe_draw_start_count_bias draw;
@@ -347,8 +359,6 @@ DrawIndexedInstanced(D3D10DDI_HDEVICE hDevice,   // IN
    info.restart_index = restart_index;
 
    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
-   { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); g_topazDrawTicks += t1.QuadPart - topazT0.QuadPart; g_topazDrawCount++; }
-   TopazAfterDraw(pDevice);
 
    if (null_ib) {
       pipe_resource_reference(&null_ib, NULL);

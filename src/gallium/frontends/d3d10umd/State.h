@@ -71,6 +71,14 @@ struct Shader
 struct Query;
 struct ElementLayout;
 
+struct PresentTiming
+{
+   LARGE_INTEGER frequency;
+   LARGE_INTEGER previous;
+   unsigned frames, draws, mapFlushes;
+   LONGLONG frameTicks, drawTicks, flushTicks, waitTicks, callbackTicks, mapFlushTicks;
+};
+
 struct Device
 {
    struct pipe_screen *screen;
@@ -78,6 +86,7 @@ struct Device
 
    struct gdikmt_device_d3dddi device;
    struct sw_winsys *vidmmWinsys;
+   PresentTiming timing;
 
    struct cso_context *cso;
 
@@ -156,13 +165,9 @@ CastPipeDevice(DXGI_DDI_HDEVICE hDevice)
 
 
 extern "C" void QcdxWddmLogf(const char *fmt, ...);
-extern "C" void TopazAfterDraw(void *device);
-extern "C" const void *g_topazPsTokens;   /* Rasterizer.cpp: PS bound (TGSI tokens) */
-extern "C" void TopazProbePresent(void);
 extern "C" void TopazStripsRestore(void *device);
 extern "C" void TopazScFixDestroy(void *device);
 extern "C" void TopazStripsResave(void *device);
-extern "C" void TopazProbeAfterCopy(void *device);   /* Rasterizer.cpp */
 extern "C" void TopazMaybeDump(void *pipe, void *presented);   /* Rasterizer.cpp */
 extern "C" void TopazLogDraw(const char *kind, unsigned count, void *device, void *rt, unsigned rtw, unsigned rth);   /* Rasterizer.cpp, QCDX_DRAWLOG=1 */   /* qcdxkm: topaz_wddm.cpp */
 

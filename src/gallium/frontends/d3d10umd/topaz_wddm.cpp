@@ -261,6 +261,31 @@ _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *args)
    return hr;
 }
 
+static void
+ReportPresentTiming(Device *pDevice)
+{
+   PresentTiming &timing = pDevice->timing;
+   double ms = 1000.0 / timing.frequency.QuadPart;
+   if (!pDevice->vidmmWinsys) {
+      uint32_t ctl, last;
+      unsigned cs[6], ds[5];
+      fd_context_debug_fences(pDevice->pipe, &ctl, &last);
+      fd_bo_cache_debug_stats(cs);
+      fd_bo_del_debug_stats(ds);
+      QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
+                   " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
+                   ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
+   }
+   QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, gpu wait %.2f, present cb %.2f, "
+                "map flushes/frame %.1f (%.2f ms/frame), draws/frame %.0f in %.2f ms\n",
+                timing.frameTicks * ms / 59, timing.flushTicks * ms / 60, timing.waitTicks * ms / 60,
+                timing.callbackTicks * ms / 60, timing.mapFlushes / 60.0, timing.mapFlushTicks * ms / 60,
+                timing.draws / 60.0, timing.drawTicks * ms / 60);
+   LARGE_INTEGER frequency = timing.frequency;
+   timing = {};
+   timing.frequency = frequency;
+}
+
 /* DXGI Present: finish the GPU work on the source, then let the KMD blt/flip it */
 HRESULT
 QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext)
@@ -270,52 +295,21 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
 
    if (!pSrc || !pSrc->hAllocation || (pDst && !pDst->hAllocation))
       return E_INVALIDARG;
-   static LARGE_INTEGER qf, tPrev;
-   static double sumFrame, sumFlush, sumWait, sumCb;
-   static unsigned nFrames;
-   static int timing = -1;
-   LARGE_INTEGER t0, t1, t2;
-   if (timing < 0) {
-      timing = getenv("QCDX_TIMING") && getenv("QCDX_TIMING")[0] == '1';
-      QueryPerformanceFrequency(&qf);
-   }
-   QueryPerformanceCounter(&t0);
+   PresentTiming &timing = pDevice->timing;
+   LARGE_INTEGER begin, flushed, completed;
+   if (timing.frequency.QuadPart) QueryPerformanceCounter(&begin);
    pipe->flush(pipe, &fence, 0);
-   QueryPerformanceCounter(&t1);
+   if (timing.frequency.QuadPart) QueryPerformanceCounter(&flushed);
    HRESULT wait = FinishFence(pDevice, fence);
    if (FAILED(wait))
       return wait;
-   QueryPerformanceCounter(&t2);
-   if (timing) {
-      double ms = 1000.0 / (double)qf.QuadPart;
-      if (tPrev.QuadPart)
-         sumFrame += (t0.QuadPart - tPrev.QuadPart) * ms;
-      sumFlush += (t1.QuadPart - t0.QuadPart) * ms;
-      sumWait += (t2.QuadPart - t1.QuadPart) * ms;
-      tPrev = t0;
-      if (++nFrames == 60) {
-         extern unsigned g_topazMapFlushes;
-         extern long long g_topazMapFlushTicks;
-         extern long long g_topazDrawTicks;
-         extern unsigned g_topazDrawCount;
-         if (!pDevice->vidmmWinsys) {
-            uint32_t ctl, last;
-            fd_context_debug_fences(pipe, &ctl, &last);
-            unsigned cs[6];
-            fd_bo_cache_debug_stats(cs);
-            unsigned ds[5];
-            fd_bo_del_debug_stats(ds);
-            QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
-                          " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
-                          ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
-         }
-         QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, gpu wait %.2f, present cb %.2f, NO_OVERWRITE flushes/frame %.1f (%.2f ms/frame), draws/frame %.0f in %.2f ms\n",
-                       sumFrame / 59, sumFlush / 60, sumWait / 60, sumCb / 60, g_topazMapFlushes / 60.0,
-                       g_topazMapFlushTicks * ms / 60, g_topazDrawCount / 60.0, g_topazDrawTicks * ms / 60);
-         g_topazDrawTicks = 0; g_topazDrawCount = 0;
-         nFrames = 0; sumFrame = sumFlush = sumWait = sumCb = 0; g_topazMapFlushes = 0; g_topazMapFlushTicks = 0;
-         tPrev.QuadPart = 0;
-      }
+   if (timing.frequency.QuadPart) {
+      QueryPerformanceCounter(&completed);
+      timing.flushTicks += flushed.QuadPart - begin.QuadPart;
+      timing.waitTicks += completed.QuadPart - flushed.QuadPart;
+      if (timing.previous.QuadPart)
+         timing.frameTicks += begin.QuadPart - timing.previous.QuadPart;
+      timing.previous = begin;
    }
    if (!pDevice->topazCtx) {
       HRESULT hr = pDevice->device.base.createContext(&pDevice->device.base, &pDevice->topazCtx);
@@ -331,13 +325,16 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
       p.hDstAllocation = pDst ? pDst->hAllocation : 0;
       p.pDXGIContext = pDXGIContext;
       p.hContext = ((struct gdikmt_context_d3dddi *)pDevice->topazCtx)->hContext;
-      LARGE_INTEGER c0, c1;
-      QueryPerformanceCounter(&c0);
+      LARGE_INTEGER callbackBegin, callbackEnd;
+      if (timing.frequency.QuadPart) QueryPerformanceCounter(&callbackBegin);
       HRESULT hr = pDevice->device.pDXGIBaseCallbacks->pfnPresentCb(pDevice->device.hRTDevice, &p);
-      QueryPerformanceCounter(&c1);
+      if (timing.frequency.QuadPart) {
+         QueryPerformanceCounter(&callbackEnd);
+         timing.callbackTicks += callbackEnd.QuadPart - callbackBegin.QuadPart;
+         if (++timing.frames == 60)
+            ReportPresentTiming(pDevice);
+      }
       QcdxTraceDisplay(&pDevice->device, QCDX_PRESENT_CB, p.hSrcAllocation, p.hDstAllocation, 0, hr);
-      if (timing)
-         sumCb += (c1.QuadPart - c0.QuadPart) * 1000.0 / (double)qf.QuadPart;
       if (FAILED(hr))
          QcdxWddmLogf("topaz: PresentCb src 0x%x dst 0x%x ctx %p -> 0x%08lx\n", p.hSrcAllocation, p.hDstAllocation,
                        p.hContext, (unsigned long)hr);
