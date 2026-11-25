@@ -413,14 +413,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
 
    pipe_resource_reference(&pDevice->index_buffer, NULL);
 
-   static struct pipe_sampler_view * sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
-   memset(sampler_views, 0, sizeof sampler_views);
-   pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0,
-                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
-   pipe->set_sampler_views(pipe, PIPE_SHADER_VERTEX, 0,
-                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
-   pipe->set_sampler_views(pipe, PIPE_SHADER_GEOMETRY, 0,
-                           PIPE_MAX_SAMPLERS, 0, false, sampler_views);   /* qcdxkm */
+   UnbindShaderResources(pDevice);
 
    ReleaseDeviceBackend(pDevice);
 }

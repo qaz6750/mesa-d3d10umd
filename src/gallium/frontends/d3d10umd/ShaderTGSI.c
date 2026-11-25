@@ -84,10 +84,10 @@ static struct dx10_opcode_xlate opcode_xlate[D3D10_SB_NUM_OPCODES] = {
    {D3D10_SB_OPCODE_DP2,                              OF_FLOAT, TGSI_OPCODE_DP2},
    {D3D10_SB_OPCODE_DP3,                              OF_FLOAT, TGSI_OPCODE_DP3},
    {D3D10_SB_OPCODE_DP4,                              OF_FLOAT, TGSI_OPCODE_DP4},
-   {D3D10_SB_OPCODE_ELSE,                             OF_FLOAT, TGSI_OPCODE_ELSE},
+   {D3D10_SB_OPCODE_ELSE,                             OF_FLOAT, TGSI_EXPAND},
    {D3D10_SB_OPCODE_EMIT,                             OF_FLOAT, TGSI_EXPAND},
    {D3D10_SB_OPCODE_EMITTHENCUT,                      OF_FLOAT, TGSI_EXPAND},
-   {D3D10_SB_OPCODE_ENDIF,                            OF_FLOAT, TGSI_OPCODE_ENDIF},
+   {D3D10_SB_OPCODE_ENDIF,                            OF_FLOAT, TGSI_EXPAND},
    {D3D10_SB_OPCODE_ENDLOOP,                          OF_FLOAT, TGSI_OPCODE_ENDLOOP},
    {D3D10_SB_OPCODE_ENDSWITCH,                        OF_FLOAT, TGSI_OPCODE_ENDSWITCH},
    {D3D10_SB_OPCODE_EQ,                               OF_FLOAT, TGSI_OPCODE_FSEQ},
@@ -1260,6 +1260,8 @@ Shader_tgsi_translate(const unsigned *code,
    uint nr_tokens;
    bool shader_dumped = false;
    bool inside_sub = false;
+   unsigned if_labels[D3D10_COMMONSHADER_FLOWCONTROL_NESTING_LIMIT];
+   unsigned if_depth = 0;
    uint i, j;
 
    memset(&sx, 0, sizeof sx);
@@ -2177,11 +2179,24 @@ Shader_tgsi_translate(const unsigned *code,
             struct ureg_dst src_nz = ureg_DECL_temporary(ureg);
             ureg_USEQ(ureg, src_nz, src, ureg_imm1u(ureg, 0));
             ureg_UIF(ureg, ureg_src(src_nz), &label);
-            ureg_release_temporary(ureg, src_nz);;
+            ureg_release_temporary(ureg, src_nz);
          } else {
             ureg_UIF(ureg, translate_src_operand(&sx, &opcode.src[0], OF_INT), &label);
          }
+         /* The interpreter jumps to the label when every lane is false. */
+         assert(if_depth < ARRAY_SIZE(if_labels));
+         if_labels[if_depth++] = label;
       }
+         break;
+      case D3D10_SB_OPCODE_ELSE:
+         assert(if_depth > 0);
+         ureg_fixup_label(ureg, if_labels[if_depth - 1], ureg_get_instruction_number(ureg));
+         ureg_ELSE(ureg, &if_labels[if_depth - 1]);
+         break;
+      case D3D10_SB_OPCODE_ENDIF:
+         assert(if_depth > 0);
+         ureg_fixup_label(ureg, if_labels[--if_depth], ureg_get_instruction_number(ureg));
+         ureg_ENDIF(ureg);
          break;
       case D3D10_SB_OPCODE_RETC:
       case D3D10_SB_OPCODE_CONTINUEC:
@@ -2226,6 +2241,7 @@ Shader_tgsi_translate(const unsigned *code,
             assert(0);
             break;
          }
+         ureg_fixup_label(ureg, label, ureg_get_instruction_number(ureg));
          ureg_ENDIF(ureg);
       }
          break;
@@ -2310,6 +2326,7 @@ Shader_tgsi_translate(const unsigned *code,
       Shader_opcode_free(&opcode);
    }
 
+   assert(if_depth == 0);
    if (inside_sub) {
       ureg_ENDSUB(ureg);
    }

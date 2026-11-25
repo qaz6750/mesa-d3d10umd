@@ -713,22 +713,6 @@ softpipe_get_lambda_from_grad_func(const struct pipe_sampler_view *view,
 
 
 static inline const float *
-get_texel_buffer_no_border(const struct sp_sampler_view *sp_sview,
-                           union tex_tile_address addr, int x, unsigned elmsize)
-{
-   const struct softpipe_tex_cached_tile *tile;
-   addr.bits.x = x * elmsize / TEX_TILE_SIZE;
-   assert(x * elmsize / TEX_TILE_SIZE == addr.bits.x);
-
-   x %= TEX_TILE_SIZE / elmsize;
-
-   tile = sp_get_cached_tile_tex(sp_sview->cache, addr);
-
-   return &tile->data.color[0][x][0];
-}
-
-
-static inline const float *
 get_texel_2d_no_border(const struct sp_sampler_view *sp_sview,
                        union tex_tile_address addr, int x, int y)
 {
@@ -3374,28 +3358,32 @@ sp_get_texels(const struct sp_sampler_view *sp_sview,
    const int width = u_minify(texture->width0, level);
    const int height = u_minify(texture->height0, level);
    const int depth = u_minify(texture->depth0, level);
-   unsigned elem_size, first_element, last_element;
 
    addr.value = 0;
    addr.bits.level = level;
 
    switch (sp_sview->base.target) {
-   case PIPE_BUFFER:
-      elem_size = util_format_get_blocksize(sp_sview->base.format);
-      first_element = sp_sview->base.u.buf.offset / elem_size;
-      last_element = (sp_sview->base.u.buf.offset +
-                      sp_sview->base.u.buf.size) / elem_size - 1;
+   case PIPE_BUFFER: {
+      const struct pipe_sampler_view *view = &sp_sview->base;
+      const unsigned elem_size = util_format_get_blocksize(view->format);
+      const uint8_t *data = softpipe_resource_data(view->texture);
       for (j = 0; j < TGSI_QUAD_SIZE; j++) {
-         const int x = CLAMP(v_i[j] + offset[0] +
-                             first_element,
-                             first_element,
-                             last_element);
-         tx = get_texel_buffer_no_border(sp_sview, addr, x, elem_size);
+         const int64_t index = (int64_t)v_i[j] + offset[0];
+         union pipe_color_union texel = {0};
+         if (data && index >= 0 && index < view->u.buf.size / elem_size) {
+            /* Buffer coordinates are elements. The texture tile address only
+             * holds 14 bits of byte tiles and wraps beyond 512 KiB. */
+            const uint64_t byte_offset = view->u.buf.offset + (uint64_t)index * elem_size;
+            if (byte_offset + elem_size <= texture->width0)
+               util_format_read_4(view->format, &texel, sizeof(texel),
+                                  data + byte_offset, elem_size, 0, 0, 1, 1);
+         }
          for (c = 0; c < 4; c++) {
-            rgba[c][j] = tx[c];
+            rgba[c][j] = texel.f[c];
          }
       }
       break;
+   }
    case PIPE_TEXTURE_1D:
       for (j = 0; j < TGSI_QUAD_SIZE; j++) {
          const int x = CLAMP(v_i[j] + offset[0], 0, width - 1);

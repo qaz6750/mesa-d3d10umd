@@ -49,6 +49,9 @@ DeleteEmptyShader(Device *pDevice,
 unsigned
 ShaderFindOutputMapping(Shader *shader, unsigned registerIndex);
 
+void
+UnbindShaderResources(Device *device);
+
 SIZE_T APIENTRY
 CalcPrivateShaderSize(D3D10DDI_HDEVICE hDevice,
                       __in_ecount (pShaderCode[1]) const UINT *pShaderCode,

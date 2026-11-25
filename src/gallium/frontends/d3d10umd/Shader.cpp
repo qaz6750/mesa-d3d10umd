@@ -233,15 +233,12 @@ SetSamplers(enum pipe_shader_type shader_type,     // IN
 }
 
 
-/*
- * ----------------------------------------------------------------------
- *
- * SetSamplers --
- *
- *    Update the driver's currently bound sampler state.
- *
- * ----------------------------------------------------------------------
- */
+static unsigned
+ShaderResourceSlotCount(Device *device, enum pipe_shader_type stage)
+{
+   int limit = device->screen->get_shader_param(device->screen, stage, PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS);
+   return CLAMP(limit, 0, PIPE_MAX_SHADER_SAMPLER_VIEWS);
+}
 
 static void
 SetShaderResources(enum pipe_shader_type shader_type,                  // IN
@@ -256,27 +253,29 @@ SetShaderResources(enum pipe_shader_type shader_type,                  // IN
    assert(Offset + NumViews <= D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
 
    struct pipe_sampler_view **sampler_views = pDevice->sampler_views[shader_type];
-   for (UINT i = 0; i < NumViews; i++) {
-      struct pipe_sampler_view *sampler_view =
-            GetPipeShaderResourceView(phShaderResourceViews[i]);
-      if (Offset + i < PIPE_MAX_SHADER_SAMPLER_VIEWS) {
-         sampler_views[Offset + i] = sampler_view;
-      } else {
-         if (sampler_view) {
-            LOG_UNSUPPORTED(true);
-            break;
-         }
-      }
+   const unsigned limit = ShaderResourceSlotCount(pDevice, shader_type);
+   if (Offset >= limit)
+      return;
+   const unsigned count = MIN2(NumViews, limit - Offset);
+   for (unsigned i = 0; i < count; ++i)
+      sampler_views[Offset + i] = GetPipeShaderResourceView(phShaderResourceViews[i]);
+   if (count) {
+      // Freedreno's A6xx callback indexes its input by the absolute slot.
+      // Submit a zero-based array, including any previously bound lower views.
+      pipe->set_sampler_views(pipe, shader_type, 0, Offset + count, 0, false, sampler_views);
    }
+}
 
-   /*
-    * XXX: Now that the semantics are actually the same in gallium, should
-    * probably think about not updating all always... It should just work.
-    */
-   /* qcdxkm: freedreno keeps PIPE_MAX_SAMPLERS (32) views per stage; passing 128 overflowed
-    * fd_texture_stateobj::textures[] and crashed DWM */
-   pipe->set_sampler_views(pipe, shader_type, 0, PIPE_MAX_SAMPLERS,
-                           0, false, sampler_views);
+void
+UnbindShaderResources(Device *device)
+{
+   struct pipe_sampler_view *empty[PIPE_MAX_SHADER_SAMPLER_VIEWS] = {};
+   const enum pipe_shader_type stages[] = { PIPE_SHADER_VERTEX, PIPE_SHADER_GEOMETRY, PIPE_SHADER_FRAGMENT };
+   for (auto stage : stages) {
+      unsigned count = ShaderResourceSlotCount(device, stage);
+      if (count)
+         device->pipe->set_sampler_views(device->pipe, stage, 0, count, 0, false, empty);
+   }
 }
 
 

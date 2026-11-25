@@ -5190,6 +5190,11 @@ exec_instruction(
       break;
 
    case TGSI_OPCODE_RET:
+      /* A return from main can terminate the shader before END. Close a
+       * pending geometry strip while the final returning lanes are active.
+       */
+      if (!mach->CallStackTop && mach->ExecMask == mach->FuncMask)
+         conditional_emit_primitive(mach);
       mach->FuncMask &= ~mach->ExecMask;
       UPDATE_EXEC_MASK(mach);
 

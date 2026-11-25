@@ -313,7 +313,7 @@ update_tgsi_samplers( struct softpipe_context *softpipe )
 
    /* XXX is this really necessary here??? */
    for (sh = 0; sh < ARRAY_SIZE(softpipe->tex_cache); sh++) {
-      for (i = 0; i < PIPE_MAX_SAMPLERS; i++) {
+      for (i = 0; i < softpipe->num_sampler_views[sh]; i++) {
          struct softpipe_tex_tile_cache *tc = softpipe->tex_cache[sh][i];
          if (tc && tc->texture) {
             struct softpipe_resource *spt = softpipe_resource(tc->texture);
