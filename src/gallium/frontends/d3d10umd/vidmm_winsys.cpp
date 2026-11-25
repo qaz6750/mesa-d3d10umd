@@ -11,6 +11,7 @@ struct VidmmWinsys {
    Device *device;
    bool stageImports;
    bool hardwareBlit;
+   bool regionCopy;
 };
 
 struct VidmmSurface {
@@ -146,7 +147,8 @@ BlitTarget(pipe_resource *res)
 }
 
 HRESULT
-QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *clearColor)
+QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *clearColor,
+              const qcdx_copy_region *region)
 {
    if (!dev->vidmmWinsys || !reinterpret_cast<VidmmWinsys *>(dev->vidmmWinsys)->hardwareBlit)
       return S_FALSE;
@@ -157,10 +159,26 @@ QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *
    unsigned color = 0;
    if (src) {
       auto *in = BlitTarget(src);
-      if (!in || dst->format != src->format || dst->width0 != src->width0 || dst->height0 != src->height0)
+      if (!in || dst->format != src->format)
          return S_FALSE;
-      if (in->allocation == out->allocation)
+      const bool sameSize = dst->width0 == src->width0 && dst->height0 == src->height0;
+      if (region && sameSize && !region->src_x && !region->src_y && !region->dst_x && !region->dst_y &&
+          region->width == dst->width0 && region->height == dst->height0)
+         region = nullptr;
+      if (region) {
+         if (!reinterpret_cast<VidmmWinsys *>(dev->vidmmWinsys)->regionCopy ||
+             (uint64_t)region->width * region->height < 65536 ||
+             (uint64_t)region->src_x + region->width > src->width0 ||
+             (uint64_t)region->src_y + region->height > src->height0 ||
+             (uint64_t)region->dst_x + region->width > dst->width0 ||
+             (uint64_t)region->dst_y + region->height > dst->height0 ||
+             in->allocation == out->allocation || (sameSize && in->pitch == out->pitch && (in->imported || out->imported)))
+            return S_FALSE;
+      } else if (!sameSize) {
+         return S_FALSE;
+      } else if (in->allocation == out->allocation) {
          return S_OK;
+      }
       source = in->allocation;
    } else {
       util_format_pack_rgba(dst->format, &color, clearColor, 1);
@@ -168,7 +186,7 @@ QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *
    // Publish dirty tiles and drop CPU locks before submitting either operand.
    // The next CPU lock or Present carries the VidMM dependency on this write.
    dev->pipe->flush(dev->pipe, nullptr, 0);
-   HRESULT hr = QcdxSubmitVidmmSurface(&dev->device, source, out->allocation, color);
+   HRESULT hr = QcdxSubmitVidmmSurface(&dev->device, source, out->allocation, color, region);
    if (SUCCEEDED(hr))
       softpipe_resource(dst)->timestamp++;
    return hr;
@@ -346,6 +364,7 @@ qcdx_create_vidmm_winsys(gdikmt_device *base, unsigned features)
       return NULL;
    ws->device = owner;
    ws->hardwareBlit = !!(features & QCDX_CAP_VIDMM_2D);
+   ws->regionCopy = !!(features & QCDX_CAP_VIDMM_COPY_REGION);
    ws->stageImports = !!(features & QCDX_CAP_VIDMM_COPY);
    ws->base.unmap_on_flush = true;
    ws->base.destroy = [](sw_winsys *w) { free(w); };

@@ -2,7 +2,7 @@
  * Escape protocol between the freedreno WDDM shim (Mesa UMD) and the qcdxkm WDDM KMD.
  * One escape = one Linux msm DRM ioctl: the KMD implements the msm driver's ioctls
  * (include/drm-uapi/msm_drm.h) plus the generic GEM ones, with the same structs.
- * Keep the copies in qcdxkm and mesa-d3d10umd identical.
+ * Keep the copies in qcdxkm and Mesa identical.
  */
 #ifndef QCDX_ESCAPE_H
 #define QCDX_ESCAPE_H
@@ -27,6 +27,7 @@
 #define QCDX_RENDER_COPY_SURFACE 2u
 /* Full native 32-bit fill. One writable allocation, color in the last dword. */
 #define QCDX_RENDER_FILL_SURFACE 3u
+#define QCDX_RENDER_COPY_REGION 4u
 
 enum qcdx_display_event {
     QCDX_MODE_BEGIN, QCDX_MODE_RESULT, QCDX_PRESENT_BEGIN, QCDX_PRESENT_CB,
@@ -50,6 +51,18 @@ struct qcdx_render_command
     };
 };
 
+/* Coordinates are in pixels. Both operands are supplied by VidMM. */
+struct qcdx_copy_region
+{
+    unsigned src_x, src_y, dst_x, dst_y, width, height;
+};
+
+struct qcdx_region_command
+{
+    struct qcdx_render_command header;
+    struct qcdx_copy_region region;
+};
+
 #define QCDX_ABI_MAJOR 1u
 #define QCDX_ABI_MINOR 1u
 #define QCDX_CAP_GEM 0x01u
@@ -63,6 +76,7 @@ struct qcdx_render_command
 #define QCDX_CAP_VIDMM_PRESENT 0x40u
 #define QCDX_CAP_VIDMM_COPY 0x80u
 #define QCDX_CAP_VIDMM_2D 0x100u
+#define QCDX_CAP_VIDMM_COPY_REGION 0x200u
 
 struct qcdx_capabilities
 {

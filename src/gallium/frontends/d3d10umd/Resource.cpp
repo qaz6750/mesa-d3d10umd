@@ -940,10 +940,11 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
    }
 
-   if (!DstSubResource && !SrcSubResource && !DstX && !DstY && !DstZ &&
-       !src_box.x && !src_box.y && !src_box.z && src_box.depth == 1 &&
-       src_box.width == (int)src_resource->width0 && src_box.height == (int)src_resource->height0) {
-      HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr);
+   if (!DstSubResource && !SrcSubResource && !DstZ &&
+       !src_box.z && src_box.depth == 1 && src_box.x >= 0 && src_box.y >= 0 && src_box.width > 0 && src_box.height > 0) {
+      qcdx_copy_region region = {(unsigned)src_box.x, (unsigned)src_box.y, DstX, DstY,
+                                 (unsigned)src_box.width, (unsigned)src_box.height};
+      HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr, &region);
       if (hr != S_FALSE) {
          SetError(hDevice, hr);
          return;

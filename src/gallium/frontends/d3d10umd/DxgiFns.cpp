@@ -412,9 +412,10 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
    if (sameSubresource && !rotated && !Blt->Flags.Resolve &&
        blit.src.box.width == width && blit.src.box.height == height)
       return S_OK;
-   if (!rotated && !Blt->Flags.Resolve && !blit.dst.box.x && !blit.dst.box.y &&
-       blit.dst.box.width == (int)dst->resource->width0 && blit.dst.box.height == (int)dst->resource->height0) {
-      HRESULT hr = QcdxVidmmBlit(device, dst->resource, src->resource, nullptr);
+   if (!rotated && !Blt->Flags.Resolve && !Blt->SrcSubresource && !Blt->DstSubresource &&
+       blit.src.box.width == width && blit.src.box.height == height) {
+      qcdx_copy_region region = {0, 0, Blt->DstLeft, Blt->DstTop, (unsigned)width, (unsigned)height};
+      HRESULT hr = QcdxVidmmBlit(device, dst->resource, src->resource, nullptr, &region);
       if (hr != S_FALSE)
          return hr;
    }

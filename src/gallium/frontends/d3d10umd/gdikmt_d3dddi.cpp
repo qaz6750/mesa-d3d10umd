@@ -163,7 +163,7 @@ gdikmt_d3dddi_render(struct gdikmt_context *_ctx, struct gdikmt_render *options)
 
 HRESULT
 QcdxSubmitVidmmSurface(struct gdikmt_device_d3dddi *device, D3DKMT_HANDLE source,
-                       D3DKMT_HANDLE destination, unsigned color)
+                       D3DKMT_HANDLE destination, unsigned color, const qcdx_copy_region *region)
 {
    AcquireSRWLockExclusive(&device->qcdxSubmitLock);
    HRESULT hr = S_OK;
@@ -172,13 +172,21 @@ QcdxSubmitVidmmSurface(struct gdikmt_device_d3dddi *device, D3DKMT_HANDLE source
    if (SUCCEEDED(hr)) {
       gdikmt_context *ctx = device->qcdxSubmitContext;
       const unsigned operands = source ? 2 : 1;
-      const qcdx_render_command command = {QCDX_ESC_MAGIC,
-         source ? QCDX_RENDER_COPY_SURFACE : QCDX_RENDER_FILL_SURFACE, 0, color};
-      if (!ctx || !ctx->pCommandBuffer || ctx->CommandBufferSize < sizeof(command) ||
+      qcdx_region_command command = {};
+      command.header.magic = QCDX_ESC_MAGIC;
+      command.header.operation = source ? QCDX_RENDER_COPY_SURFACE : QCDX_RENDER_FILL_SURFACE;
+      command.header.color = color;
+      unsigned length = sizeof(command.header);
+      if (region) {
+         command.header.operation = QCDX_RENDER_COPY_REGION;
+         command.region = *region;
+         length = sizeof(command);
+      }
+      if (!ctx || !ctx->pCommandBuffer || ctx->CommandBufferSize < length ||
           !ctx->pAllocationList || ctx->AllocationListSize < operands) {
          hr = E_UNEXPECTED;
       } else {
-         memcpy(ctx->pCommandBuffer, &command, sizeof(command));
+         memcpy(ctx->pCommandBuffer, &command, length);
          D3DDDI_ALLOCATIONLIST *list = ctx->pAllocationList;
          if (source) {
             list[0] = {};
@@ -188,7 +196,7 @@ QcdxSubmitVidmmSurface(struct gdikmt_device_d3dddi *device, D3DKMT_HANDLE source
          list[operands - 1].hAllocation = destination;
          list[operands - 1].WriteOperation = TRUE;
          gdikmt_render args = {};
-         args.CommandLength = sizeof(command);
+         args.CommandLength = length;
          args.AllocationCount = operands;
          hr = ctx->render(ctx, &args);
       }
