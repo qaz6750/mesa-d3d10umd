@@ -328,8 +328,8 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourc
  */
 
 static HRESULT
-CopyRotated(struct pipe_context *pipe, const struct pipe_blit_info &blit,
-            DXGI_DDI_MODE_ROTATION rotation, bool mayAlias)
+CopyBltPixels(struct pipe_context *pipe, const struct pipe_blit_info &blit,
+              DXGI_DDI_MODE_ROTATION rotation, bool mayAlias)
 {
    struct pipe_transfer *srcTransfer = NULL, *dstTransfer = NULL;
    const uint8_t *src = static_cast<const uint8_t *>(pipe->texture_map(pipe, blit.src.resource,
@@ -338,15 +338,16 @@ CopyRotated(struct pipe_context *pipe, const struct pipe_blit_info &blit,
       return E_FAIL;
 
    const ptrdiff_t pixel = util_format_get_blocksize(blit.dst.format);
+   const size_t rowBytes = util_format_get_stride(blit.src.format, blit.src.box.width);
+   const unsigned rows = util_format_get_nblocksy(blit.src.format, blit.src.box.height);
    ptrdiff_t stride = srcTransfer->stride;
    uint8_t *snapshot = NULL;
    if (mayAlias) {
       // Distinct KMT handles can open the same allocation. Finish reading before
-      // locking its destination so an in-place turn cannot overwrite unread texels.
-      const size_t rowBytes = blit.src.box.width * pixel;
-      snapshot = static_cast<uint8_t *>(calloc(blit.src.box.height, rowBytes));
+      // locking its destination so a write cannot overwrite unread texels.
+      snapshot = static_cast<uint8_t *>(calloc(rows, rowBytes));
       if (snapshot) {
-         for (int y = 0; y < blit.src.box.height; ++y)
+         for (unsigned y = 0; y < rows; ++y)
             memcpy(snapshot + y * rowBytes, src + y * stride, rowBytes);
       }
       pipe_texture_unmap(pipe, srcTransfer);
@@ -367,7 +368,7 @@ CopyRotated(struct pipe_context *pipe, const struct pipe_blit_info &blit,
 
    const ptrdiff_t lastRow = (blit.src.box.height - 1) * stride;
    const ptrdiff_t lastCol = (blit.src.box.width - 1) * pixel;
-   ptrdiff_t stepX, stepY;
+   ptrdiff_t stepX = pixel, stepY = stride;
    if (rotation == DXGI_DDI_MODE_ROTATION_ROTATE90) {
       src += lastRow;
       stepX = -stride;
@@ -376,16 +377,20 @@ CopyRotated(struct pipe_context *pipe, const struct pipe_blit_info &blit,
       src += lastRow + lastCol;
       stepX = -pixel;
       stepY = -stride;
-   } else {
+   } else if (rotation == DXGI_DDI_MODE_ROTATION_ROTATE270) {
       src += lastCol;
       stepX = stride;
       stepY = -pixel;
    }
-   for (int y = 0; y < blit.dst.box.height; ++y) {
+   const unsigned dstRows = util_format_get_nblocksy(blit.dst.format, blit.dst.box.height);
+   for (unsigned y = 0; y < dstRows; ++y) {
       const uint8_t *srcRow = src + y * stepY;
       uint8_t *dstRow = dst + (size_t)y * dstTransfer->stride;
-      for (int x = 0; x < blit.dst.box.width; ++x)
-         memcpy(dstRow + x * pixel, srcRow + x * stepX, pixel);
+      if (rotation <= DXGI_DDI_MODE_ROTATION_IDENTITY)
+         memcpy(dstRow, srcRow, rowBytes);
+      else
+         for (int x = 0; x < blit.dst.box.width; ++x)
+            memcpy(dstRow + x * pixel, srcRow + x * stepX, pixel);
    }
    pipe_texture_unmap(pipe, dstTransfer);
    if (srcTransfer)
@@ -404,7 +409,7 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
 
    const bool rotated = Blt->Rotate >= DXGI_DDI_MODE_ROTATION_ROTATE90;
    if (Blt->SrcSubresource >= src->NumSubResources || Blt->DstSubresource >= dst->NumSubResources ||
-       src->buffer || dst->buffer || (!rotated && src->resource == dst->resource))
+       src->buffer || dst->buffer)
       return E_INVALIDARG;
    struct pipe_blit_info blit = {};
    blit.src.resource = src->resource;
@@ -439,16 +444,22 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
                    util_format_is_depth_or_stencil(blit.dst.format) ||
                    blit.dst.resource->nr_samples > 1))
       return DXGI_DDI_ERR_UNSUPPORTED;
-   const bool mayAlias = src->resource == dst->resource || (src->hAllocation && dst->hAllocation);
-   if (rotated && mayAlias) {
+   const bool sameTexture = src->resource == dst->resource;
+   const bool sameSubresource = sameTexture && Blt->SrcSubresource == Blt->DstSubresource;
+   const bool mayAlias = sameTexture ? sameSubresource :
+      src->hAllocation && dst->hAllocation && (!device->vidmmWinsys || QcdxVidmmMayAlias(src, dst));
+   if (sameSubresource && !rotated && !Blt->Flags.Resolve &&
+       blit.src.box.width == width && blit.src.box.height == height)
+      return S_OK;
+   if (mayAlias) {
       HRESULT hr = QcdxWddmFinishResource(device, dst);
       if (FAILED(hr))
          return hr;
    }
    if (blit.src.format == blit.dst.format && blit.src.box.width == width && blit.src.box.height == height &&
        !Blt->Flags.Resolve && (!rotated || blit.src.resource->nr_samples <= 1)) {
-      if (rotated)
-         return CopyRotated(device->pipe, blit, Blt->Rotate, mayAlias);
+      if (rotated || mayAlias)
+         return CopyBltPixels(device->pipe, blit, Blt->Rotate, mayAlias);
       device->pipe->resource_copy_region(device->pipe, blit.dst.resource, blit.dst.level,
          blit.dst.box.x, blit.dst.box.y, blit.dst.box.z, blit.src.resource, blit.src.level, &blit.src.box);
    } else {
@@ -460,9 +471,9 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
          return DXGI_DDI_ERR_UNSUPPORTED;
       blit.mask = PIPE_MASK_RGBA;
       blit.filter = Blt->Flags.Stretch ? PIPE_TEX_FILTER_LINEAR : PIPE_TEX_FILTER_NEAREST;
-      if (rotated) {
-         // Gallium blits can scale and convert, but their rectangles have parallel axes.
-         // Blit to the unrotated extent first and rotate the resulting texels once.
+      if (rotated || mayAlias) {
+         // A separate render target supports both the final rotation and
+         // reading every source texel before touching an aliased destination.
          struct pipe_resource desc = {};
          desc.target = PIPE_TEXTURE_2D;
          desc.format = blit.dst.format;
@@ -479,7 +490,7 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
          u_box_2d(0, 0, width, height, &scaled.dst.box);
          device->pipe->blit(device->pipe, &scaled);
          blit.src = scaled.dst;
-         HRESULT hr = CopyRotated(device->pipe, blit, Blt->Rotate, false);
+         HRESULT hr = CopyBltPixels(device->pipe, blit, Blt->Rotate, false);
          pipe_resource_reference(&scratch, NULL);
          return hr;
       }

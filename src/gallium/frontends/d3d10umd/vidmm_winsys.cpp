@@ -15,6 +15,7 @@ struct VidmmWinsys {
 struct VidmmSurface {
    D3DKMT_HANDLE allocation;
    unsigned pitch;
+   bool imported;
    bool privateAllocation;
    qcdx_alloc stagingDesc;
    D3DKMT_HANDLE staging;
@@ -99,6 +100,7 @@ FromHandle(sw_winsys *ws, const pipe_resource *res, winsys_handle *handle, unsig
    if (surface) {
       surface->allocation = (D3DKMT_HANDLE)(uintptr_t)handle->handle;
       surface->pitch = *stride = handle->stride;
+      surface->imported = true;
       if (reinterpret_cast<VidmmWinsys *>(ws)->stageImports) {
          auto &desc = surface->stagingDesc;
          desc.magic = QCDX_ALLOC_MAGIC;
@@ -111,6 +113,17 @@ FromHandle(sw_winsys *ws, const pipe_resource *res, winsys_handle *handle, unsig
       }
    }
    return reinterpret_cast<sw_displaytarget *>(surface);
+}
+
+bool
+QcdxVidmmMayAlias(Resource *src, Resource *dst)
+{
+   // An OpenResource handle can name another handle's backing. Its private
+   // allocation description preserves the creator's full dimensions and pitch.
+   auto *a = reinterpret_cast<VidmmSurface *>(softpipe_resource(src->resource)->dt);
+   auto *b = reinterpret_cast<VidmmSurface *>(softpipe_resource(dst->resource)->dt);
+   return a && b && (a->imported || b->imported) && a->pitch == b->pitch &&
+          src->resource->width0 == dst->resource->width0 && src->resource->height0 == dst->resource->height0;
 }
 
 static bool
