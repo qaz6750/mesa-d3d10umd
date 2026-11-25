@@ -217,102 +217,64 @@ _QueryResourceResidency( DXGI_DDI_ARG_QUERYRESOURCERESIDENCY *QueryResourceResid
  * ----------------------------------------------------------------------
  */
 
+static HRESULT
+RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
+{
+   pipe_resource *stack[4];
+   pipe_resource **storage = stack;
+   const UINT count = args->Resources;
+   Resource *first = CastResource(args->pResources[0]);
+   if (!first || !first->resource)
+      return E_INVALIDARG;
+
+   for (UINT i = 0; i < count; ++i) {
+      Resource *r = CastResource(args->pResources[i]);
+      if (!r || !r->resource || !r->hAllocation || r->NumSubResources != 1 ||
+          !r->transfers || r->transfers[0] || r->resource->target != PIPE_TEXTURE_2D ||
+          r->resource->screen != first->resource->screen || r->resource->nr_samples != first->resource->nr_samples ||
+          r->resource->format != first->resource->format || r->resource->width0 != first->resource->width0 ||
+          r->resource->height0 != first->resource->height0)
+         return E_INVALIDARG;
+      for (UINT j = 0; j < i; ++j) {
+         if (r->resource == CastResource(args->pResources[j])->resource)
+            return E_INVALIDARG;
+      }
+   }
+   if (count > ARRAY_SIZE(stack)) {
+      storage = static_cast<pipe_resource **>(calloc(count, sizeof(*storage)));
+      if (!storage)
+         return E_OUTOFMEMORY;
+   }
+   for (UINT i = 0; i < count; ++i)
+      storage[i] = CastResource(args->pResources[i])->resource;
+
+   // Views stay bound to their pipe_resource. The VidMM handle must follow
+   // the underlying BO through the entire flip chain.
+   device->pipe->flush(device->pipe, NULL, 0);
+   fd_resource_rotate_storage(device->pipe, storage, count);
+   if (storage != stack)
+      free(storage);
+   D3DKMT_HANDLE firstHandle = first->hAllocation;
+   for (UINT i = 1; i < count; ++i)
+      CastResource(args->pResources[i - 1])->hAllocation = CastResource(args->pResources[i])->hAllocation;
+   CastResource(args->pResources[count - 1])->hAllocation = firstHandle;
+   return S_OK;
+}
+
 HRESULT APIENTRY
-_RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResourceIdentities )
+_RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
 {
    LOG_ENTRYPOINT();
-
-   if (!RotateResourceIdentities || !RotateResourceIdentities->hDevice ||
-       (RotateResourceIdentities->Resources && !RotateResourceIdentities->pResources))
+   if (!args || !args->hDevice || (args->Resources && !args->pResources))
       return E_INVALIDARG;
-   QcdxWddmLogf("DXGI RotateResourceIdentities %u\n", RotateResourceIdentities->Resources);
-   if (RotateResourceIdentities->Resources <= 1) {
-      return S_OK;
-   }
-   Device *owner = CastDevice(RotateResourceIdentities->hDevice);
-   if (owner->vidmmWinsys) {
-      Resource *first = CastResource(RotateResourceIdentities->pResources[0]);
-      HRESULT hr = QcdxWddmRotateVidmm(owner, RotateResourceIdentities);
-      QcdxTraceDisplay(&owner->device, QCDX_ROTATE, first ? first->hAllocation : 0,
-                       RotateResourceIdentities->Resources, 0, hr);
-      return hr;
-   }
-   UINT NumResources = RotateResourceIdentities->Resources;
-   const DXGI_DDI_HRESOURCE *hResources = RotateResourceIdentities->pResources;
-
-   /* qcdxkm experiment (umd.env QCDX_NOROTATE=1): no rotation - DWM renders into and flips the same
-    * buffer, which then always holds the previous frame (DWM redraws only dirty regions) */
-   if (getenv("QCDX_NOROTATE"))
+   if (args->Resources <= 1)
       return S_OK;
 
-   /* qcdxkm: rotate the storage (freedreno BOs), not the pipe_resource objects: views keep pointing
-    * at the right buffer. The allocation handles follow their BOs. */
-   {
-      Device *device = CastDevice(RotateResourceIdentities->hDevice);
-      struct pipe_resource *prscs[16];
-      UINT n = NumResources < 16 ? NumResources : 16;
-      D3DKMT_HANDLE firstAllocation = CastResource(hResources[0])->hAllocation;
-
-      /* QCDX_ROTATE_REVERSE=1: rotate the other way ([i] takes [i-1]) - experiment */
-      bool rev = getenv("QCDX_ROTATE_REVERSE") != NULL;
-      for (UINT i = 0; i < n; ++i)
-         prscs[rev ? n - 1 - i : i] = CastPipeResource(hResources[i]);
-      device->pipe->flush(device->pipe, NULL, 0);
-      {
-         static unsigned topazRot;
-         if (++topazRot <= 60)
-            QcdxWddmLogf("  rotate%s: [0] %p a0x%x [1] %p a0x%x [2] %p a0x%x\n", rev ? " reverse" : "",
-                          CastResource(hResources[0])->resource, CastResource(hResources[0])->hAllocation,
-                          n > 1 ? CastResource(hResources[1])->resource : NULL, n > 1 ? CastResource(hResources[1])->hAllocation : 0,
-                          n > 2 ? CastResource(hResources[2])->resource : NULL, n > 2 ? CastResource(hResources[2])->hAllocation : 0);
-      }
-      fd_resource_rotate_storage(device->pipe, prscs, n);
-      /* QCDX_FULLCOPY=1: the new back buffer [1] starts as a full copy of the frame just presented
-       * ([0]). DWM then only has to be right inside its damage rect; stale content outside it that
-       * came from diverged buffers can no longer exist. Cross-check experiment. */
-      if (!rev && n > 1 && getenv("QCDX_FULLCOPY") && getenv("QCDX_FULLCOPY")[0] == '1') {
-         struct pipe_context *pipe = device->pipe;
-         struct pipe_resource *src = prscs[0], *dst = prscs[1];
-         struct pipe_box box;
-         memset(&box, 0, sizeof(box));
-         box.width = src->width0;
-         box.height = src->height0;
-         box.depth = 1;
-         pipe->resource_copy_region(pipe, dst, 0, 0, 0, 0, src, 0, &box);
-      }
-      /* QCDX_POISON=1 (INVALID as a test: DWM relies on the back buffers keeping their content, it
-       * only copies/redraws the damage - poisoning makes everything outside the damage magenta): the next back buffer ([1]) becomes magenta, so pixels DWM does not write in
-       * a frame show up as magenta (draw-side bug) instead of stale content */
-      if (!rev && n > 1 && getenv("QCDX_POISON") && getenv("QCDX_POISON")[0] == '1') {
-         struct pipe_context *pipe = device->pipe;
-         struct pipe_resource *pr = prscs[1];
-         struct pipe_surface tmpl;
-         memset(&tmpl, 0, sizeof(tmpl));
-         tmpl.format = pr->format;
-         tmpl.u.tex.level = 0;
-         tmpl.u.tex.first_layer = 0;
-         tmpl.u.tex.last_layer = 0;
-         struct pipe_surface *surf = pipe->create_surface(pipe, pr, &tmpl);
-         if (surf) {
-            union pipe_color_union magenta;
-            magenta.f[0] = 1.0f; magenta.f[1] = 0.0f; magenta.f[2] = 1.0f; magenta.f[3] = 1.0f;
-            pipe->clear_render_target(pipe, surf, &magenta, 0, 0, surf->width, surf->height, true);
-            pipe_surface_reference(&surf, NULL);
-         }
-      }
-      if (!rev) {
-         for (UINT i = 0; i + 1 < n; ++i)
-            CastResource(hResources[i])->hAllocation = CastResource(hResources[i + 1])->hAllocation;
-         CastResource(hResources[n - 1])->hAllocation = firstAllocation;
-      } else {
-         D3DKMT_HANDLE lastAllocation = CastResource(hResources[n - 1])->hAllocation;
-         for (UINT i = n - 1; i > 0; --i)
-            CastResource(hResources[i])->hAllocation = CastResource(hResources[i - 1])->hAllocation;
-         CastResource(hResources[0])->hAllocation = lastAllocation;
-      }
-   }
-
-   return S_OK;
+   Device *device = CastDevice(args->hDevice);
+   HRESULT hr = device->vidmmWinsys ? QcdxWddmRotateVidmm(device, args) : RotateGpuStorage(device, args);
+   Resource *first = CastResource(args->pResources[0]);
+   QcdxTraceDisplay(&device->device, QCDX_ROTATE, first ? first->hAllocation : 0, args->Resources, 0, hr);
+   return hr;
 }
 
 
