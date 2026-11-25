@@ -10,6 +10,7 @@ struct VidmmWinsys {
    sw_winsys base;
    Device *device;
    bool stageImports;
+   bool hardwareBlit;
 };
 
 struct VidmmSurface {
@@ -126,6 +127,53 @@ QcdxVidmmMayAlias(Resource *src, Resource *dst)
           src->resource->width0 == dst->resource->width0 && src->resource->height0 == dst->resource->height0;
 }
 
+static VidmmSurface *
+BlitTarget(pipe_resource *res)
+{
+   if (!res || res->target != PIPE_TEXTURE_2D || res->last_level || res->array_size != 1 ||
+       res->nr_samples > 1 || (uint64_t)res->width0 * res->height0 < 65536)
+      return nullptr;
+   switch (res->format) {
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+      break;
+   default:
+      return nullptr;
+   }
+   auto *target = reinterpret_cast<VidmmSurface *>(softpipe_resource(res)->dt);
+   return target && !(target->pitch & 63) ? target : nullptr;
+}
+
+HRESULT
+QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *clearColor)
+{
+   if (!dev->vidmmWinsys || !reinterpret_cast<VidmmWinsys *>(dev->vidmmWinsys)->hardwareBlit)
+      return S_FALSE;
+   auto *out = BlitTarget(dst);
+   if (!out)
+      return S_FALSE;
+   D3DKMT_HANDLE source = 0;
+   unsigned color = 0;
+   if (src) {
+      auto *in = BlitTarget(src);
+      if (!in || dst->format != src->format || dst->width0 != src->width0 || dst->height0 != src->height0)
+         return S_FALSE;
+      if (in->allocation == out->allocation)
+         return S_OK;
+      source = in->allocation;
+   } else {
+      util_format_pack_rgba(dst->format, &color, clearColor, 1);
+   }
+   // Publish dirty tiles and drop CPU locks before submitting either operand.
+   // The next CPU lock or Present carries the VidMM dependency on this write.
+   dev->pipe->flush(dev->pipe, nullptr, 0);
+   HRESULT hr = QcdxSubmitVidmmSurface(&dev->device, source, out->allocation, color);
+   if (SUCCEEDED(hr))
+      softpipe_resource(dst)->timestamp++;
+   return hr;
+}
+
 static bool
 GetHandle(sw_winsys *, sw_displaytarget *dt, winsys_handle *handle)
 {
@@ -192,7 +240,7 @@ CopyStaging(Device *dev, VidmmSurface *surface, bool writeBack)
 {
    D3DKMT_HANDLE source = writeBack ? surface->staging : surface->allocation;
    D3DKMT_HANDLE destination = writeBack ? surface->allocation : surface->staging;
-   HRESULT hr = QcdxCopyVidmmSurface(&dev->device, source, destination);
+   HRESULT hr = QcdxSubmitVidmmSurface(&dev->device, source, destination, 0);
    QcdxTraceDisplay(&dev->device, QCDX_SHARED_COPY, surface->allocation, surface->staging, writeBack, hr);
    return hr;
 }
@@ -297,6 +345,7 @@ qcdx_create_vidmm_winsys(gdikmt_device *base, unsigned features)
    if (!ws)
       return NULL;
    ws->device = owner;
+   ws->hardwareBlit = !!(features & QCDX_CAP_VIDMM_2D);
    ws->stageImports = !!(features & QCDX_CAP_VIDMM_COPY);
    ws->base.unmap_on_flush = true;
    ws->base.destroy = [](sw_winsys *w) { free(w); };

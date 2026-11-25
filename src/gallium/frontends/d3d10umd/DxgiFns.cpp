@@ -451,6 +451,12 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
    if (sameSubresource && !rotated && !Blt->Flags.Resolve &&
        blit.src.box.width == width && blit.src.box.height == height)
       return S_OK;
+   if (!rotated && !Blt->Flags.Resolve && !blit.dst.box.x && !blit.dst.box.y &&
+       blit.dst.box.width == (int)dst->resource->width0 && blit.dst.box.height == (int)dst->resource->height0) {
+      HRESULT hr = QcdxVidmmBlit(device, dst->resource, src->resource, nullptr);
+      if (hr != S_FALSE)
+         return hr;
+   }
    if (mayAlias) {
       HRESULT hr = QcdxWddmFinishResource(device, dst);
       if (FAILED(hr))

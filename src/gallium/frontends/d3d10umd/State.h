@@ -456,6 +456,7 @@ HRESULT QcdxWddmOpen(Device *device, const D3D10DDIARG_OPENRESOURCE *open, Resou
 HRESULT QcdxWddmFinishResource(Device *device, Resource *resource);
 HRESULT QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext);
 HRESULT QcdxWddmRotateVidmm(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args);
+HRESULT QcdxVidmmBlit(Device *dev, pipe_resource *dst, pipe_resource *src, const float *clearColor);
 bool QcdxVidmmMayAlias(Resource *src, Resource *dst);
 void QcdxWddmLogInit(void);
 unsigned QcdxD3dFormat(enum pipe_format format);

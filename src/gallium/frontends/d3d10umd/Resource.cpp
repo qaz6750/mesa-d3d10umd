@@ -836,12 +836,6 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    struct pipe_context *pipe = pDevice->pipe;
    Resource *pDstResource = CastResource(hDstResource);
    Resource *pSrcResource = CastResource(hSrcResource);
-   if (pDstResource->hAllocation || pSrcResource->hAllocation) {   /* qcdxkm: swapchain copies */
-      static unsigned topazCopies;
-      if (++topazCopies <= 3000)
-         QcdxWddmLogf("%s dst %p(alloc 0x%x) <- src %p(alloc 0x%x)\n", __func__, pDstResource->resource,
-                       pDstResource->hAllocation, pSrcResource->resource, pSrcResource->hAllocation);
-   }
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
    bool compatible;
@@ -853,6 +847,11 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    assert(dst_resource->last_level == src_resource->last_level);
    assert(dst_resource->array_size == src_resource->array_size);
 
+   HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr);
+   if (hr != S_FALSE) {
+      SetError(hDevice, hr);
+      return;
+   }
    compatible = areResourcesCompatible(src_resource, dst_resource);
 
    /* could also use one 3d copy for arrays */
@@ -917,12 +916,6 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
    struct pipe_context *pipe = pDevice->pipe;
    Resource *pDstResource = CastResource(hDstResource);
    Resource *pSrcResource = CastResource(hSrcResource);
-   if (pDstResource->hAllocation || pSrcResource->hAllocation) {   /* qcdxkm: swapchain copies */
-      static unsigned topazCopies;
-      if (++topazCopies <= 3000)
-         QcdxWddmLogf("%s dst %p(alloc 0x%x) <- src %p(alloc 0x%x)\n", __func__, pDstResource->resource,
-                       pDstResource->hAllocation, pSrcResource->resource, pSrcResource->hAllocation);
-   }
    struct pipe_resource *dst_resource = pDstResource->resource;
    struct pipe_resource *src_resource = pSrcResource->resource;
 
@@ -948,16 +941,14 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
    }
 
-   if (pDstResource->hAllocation || pSrcResource->hAllocation)
-      QcdxWddmLogf("  copy dst xy %u,%u <- src box %d,%d %dx%d (lvl %u/%u, fmt %d/%d)\n", DstX, DstY, src_box.x, src_box.y,
-                    src_box.width, src_box.height, dst_level, src_level, (int)dst_resource->format, (int)src_resource->format);
-   /* qcdxkm experiment QCDX_COPYPATH=1: swapchain copies through the CPU (util_resource_copy_region)
-    * instead of freedreno's blitter - are the 1-px dashed strokes in DWM's thin damage-complement copies? */
-   if ((pDstResource->hAllocation || pSrcResource->hAllocation) &&
-       getenv("QCDX_COPYPATH") && getenv("QCDX_COPYPATH")[0] == '1') {
-      util_resource_copy_region(pipe, dst_resource, dst_level, DstX, DstY, DstZ + dst_layer,
-                                src_resource, src_level, &src_box);
-      return;
+   if (!DstSubResource && !SrcSubResource && !DstX && !DstY && !DstZ &&
+       !src_box.x && !src_box.y && !src_box.z && src_box.depth == 1 &&
+       src_box.width == (int)src_resource->width0 && src_box.height == (int)src_resource->height0) {
+      HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr);
+      if (hr != S_FALSE) {
+         SetError(hDevice, hr);
+         return;
+      }
    }
    if (areResourcesCompatible(src_resource, dst_resource)) {
       pipe->resource_copy_region(pipe,

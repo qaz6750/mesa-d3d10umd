@@ -25,6 +25,8 @@
 /* Full linear copy. The allocation list contains the source, then a writable
    destination. VidMM supplies the device-specific handles and residency. */
 #define QCDX_RENDER_COPY_SURFACE 2u
+/* Full native 32-bit fill. One writable allocation, color in the last dword. */
+#define QCDX_RENDER_FILL_SURFACE 3u
 
 enum qcdx_display_event {
     QCDX_MODE_BEGIN, QCDX_MODE_RESULT, QCDX_PRESENT_BEGIN, QCDX_PRESENT_CB,
@@ -42,7 +44,10 @@ struct qcdx_render_command
     unsigned magic;
     unsigned operation;
     unsigned fence;
-    unsigned reserved;
+    union {
+        unsigned reserved;
+        unsigned color; /* Native pixel for QCDX_RENDER_FILL_SURFACE. */
+    };
 };
 
 #define QCDX_ABI_MAJOR 1u
@@ -57,6 +62,7 @@ struct qcdx_render_command
 /* VidMM-backed linear surfaces can be locked by the UMD and presented by the KMD. */
 #define QCDX_CAP_VIDMM_PRESENT 0x40u
 #define QCDX_CAP_VIDMM_COPY 0x80u
+#define QCDX_CAP_VIDMM_2D 0x100u
 
 struct qcdx_capabilities
 {

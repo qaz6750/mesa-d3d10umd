@@ -30,6 +30,7 @@ struct gdikmt_context_d3dddi {
 };
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
-HRESULT QcdxCopyVidmmSurface(gdikmt_device_d3dddi *device, D3DKMT_HANDLE source, D3DKMT_HANDLE destination);
+HRESULT QcdxSubmitVidmmSurface(gdikmt_device_d3dddi *device, D3DKMT_HANDLE source,
+                               D3DKMT_HANDLE destination, unsigned color);
 void QcdxTraceDisplay(gdikmt_device_d3dddi *device, qcdx_display_event event,
                       UINT allocation, UINT detail, UINT flags, HRESULT hr);
