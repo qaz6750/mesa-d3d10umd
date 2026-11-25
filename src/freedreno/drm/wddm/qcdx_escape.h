@@ -133,6 +133,8 @@ struct qcdx_escape
 #define QCDX_ALLOC_GDI 4
 #define QCDX_ALLOC_F_PRIMARY 0x1
 #define QCDX_ALLOC_F_SRGB 0x2
+/* Dedicated linear VidMM allocation covering the entire texture BO. */
+#define QCDX_ALLOC_F_DIRECT 0x4
 
 struct qcdx_alloc
 {

@@ -258,6 +258,11 @@ fd_bo_cache_alloc(struct fd_bo_cache *cache, uint32_t *size, uint32_t flags)
    struct fd_bo_bucket *bucket;
 
    *size = align(*size, os_page_size);
+#ifdef FD_WDDM
+   /* Shared BOs never enter the cache. Keep their VidMM backing page-sized. */
+   if (flags & FD_BO_SHARED)
+      return NULL;
+#endif
    bucket = get_bucket(cache, *size);
 
    struct list_head freelist;

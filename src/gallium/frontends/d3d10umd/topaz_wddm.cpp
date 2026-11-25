@@ -13,6 +13,7 @@
 #include "Format.h"
 
 #include "frontend/winsys_handle.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "pipe/p_defines.h"
 #include "util/u_inlines.h"
 #include "util/os_time.h"
@@ -145,6 +146,11 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
       a.bo_offset = wh.offset;
    }
    a.size = wh.stride * res->height0;
+   if (vidmm && singleSurface && wh.modifier == DRM_FORMAT_MOD_LINEAR && !wh.offset &&
+       wh.size >= a.size && wh.size <= 64u * 1024 * 1024 && !(wh.size & 4095u)) {
+      a.size = static_cast<unsigned>(wh.size);
+      a.flags |= QCDX_ALLOC_F_DIRECT;
+   }
    if (scanout) {
       a.flags |= QCDX_ALLOC_F_PRIMARY;
       a.vidpn = pCreate->pPrimaryDesc->VidPnSourceId;

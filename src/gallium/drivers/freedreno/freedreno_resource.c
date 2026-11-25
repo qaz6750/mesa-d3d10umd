@@ -1104,7 +1104,9 @@ fd_resource_get_handle(struct pipe_screen *pscreen, struct pipe_context *pctx,
 
    rsc->b.is_shared = true;
 #ifdef FD_WDDM
-   /* The KMD populates a linear VidMM mirror before the first GPU read. */
+   handle->size = fd_bo_size(rsc->bo);
+   handle->offset = fd_resource_offset(rsc, 0, 0);
+   /* The KMD supplies VidMM pixels before the first GPU read. */
    if (usage & PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE)
       rsc->valid = true;
 #endif
