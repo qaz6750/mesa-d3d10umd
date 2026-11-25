@@ -39,6 +39,39 @@ gdikmt_d3dddi_queryadapterinfo(struct gdikmt_device *_device,
                                                            &queryAdapterInfo);
 }
 
+/* qcdxkm returns the GEM handle as its flink name. A device can have
+ * several opens of the same storage. Submit each runtime handle once. */
+static NTSTATUS
+BuildAllocationList(struct gdikmt_device_d3dddi *device, gdikmt_context *context,
+                    const drm_msm_gem_submit *batch, gdikmt_render *render)
+{
+   auto *buffers = reinterpret_cast<const drm_msm_gem_submit_bo *>((uintptr_t)batch->bos);
+   list_for_each_entry(qcdx_shared_allocation, allocation, &device->sharedAllocations, link) {
+      bool used = false, write = false;
+      for (unsigned i = 0; i < batch->nr_bos; ++i) {
+         if (buffers[i].handle == allocation->boName) {
+            used = true;
+            write |= (buffers[i].flags & MSM_SUBMIT_BO_WRITE) != 0;
+         }
+      }
+      if (!used)
+         continue;
+      unsigned index = 0;
+      while (index < render->AllocationCount &&
+             context->pAllocationList[index].hAllocation != allocation->handle)
+         ++index;
+      if (index == render->AllocationCount) {
+         if (!context->pAllocationList || index >= context->AllocationListSize)
+            return STATUS_NO_MEMORY;
+         context->pAllocationList[index] = {};
+         context->pAllocationList[index].hAllocation = allocation->handle;
+         ++render->AllocationCount;
+      }
+      context->pAllocationList[index].WriteOperation |= write;
+   }
+   return STATUS_SUCCESS;
+}
+
 NTSTATUS
 gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
                      UINT PrivateDriverDataSize)
@@ -74,7 +107,9 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
             struct gdikmt_render options = {};
             memcpy(context->pCommandBuffer, &command, sizeof(command));
             options.CommandLength = sizeof(command);
-            status = context->render(context, &options);
+            status = BuildAllocationList(device, context, batch, &options);
+            if (status == STATUS_SUCCESS)
+               status = context->render(context, &options);
          }
       }
       if (status != STATUS_SUCCESS) {
@@ -159,50 +194,6 @@ gdikmt_d3dddi_render(struct gdikmt_context *_ctx, struct gdikmt_render *options)
    ctx->base.PatchLocationListSize = render.NewPatchLocationListSize;
 
    return Status;
-}
-
-HRESULT
-QcdxSubmitVidmmSurface(struct gdikmt_device_d3dddi *device, D3DKMT_HANDLE source,
-                       D3DKMT_HANDLE destination, unsigned color, const qcdx_copy_region *region)
-{
-   AcquireSRWLockExclusive(&device->qcdxSubmitLock);
-   HRESULT hr = S_OK;
-   if (!device->qcdxSubmitContext)
-      hr = device->base.createContext(&device->base, &device->qcdxSubmitContext);
-   if (SUCCEEDED(hr)) {
-      gdikmt_context *ctx = device->qcdxSubmitContext;
-      const unsigned operands = source ? 2 : 1;
-      qcdx_region_command command = {};
-      command.header.magic = QCDX_ESC_MAGIC;
-      command.header.operation = source ? QCDX_RENDER_COPY_SURFACE : QCDX_RENDER_FILL_SURFACE;
-      command.header.color = color;
-      unsigned length = sizeof(command.header);
-      if (region) {
-         command.header.operation = QCDX_RENDER_COPY_REGION;
-         command.region = *region;
-         length = sizeof(command);
-      }
-      if (!ctx || !ctx->pCommandBuffer || ctx->CommandBufferSize < length ||
-          !ctx->pAllocationList || ctx->AllocationListSize < operands) {
-         hr = E_UNEXPECTED;
-      } else {
-         memcpy(ctx->pCommandBuffer, &command, length);
-         D3DDDI_ALLOCATIONLIST *list = ctx->pAllocationList;
-         if (source) {
-            list[0] = {};
-            list[0].hAllocation = source;
-         }
-         list[operands - 1] = {};
-         list[operands - 1].hAllocation = destination;
-         list[operands - 1].WriteOperation = TRUE;
-         gdikmt_render args = {};
-         args.CommandLength = length;
-         args.AllocationCount = operands;
-         hr = ctx->render(ctx, &args);
-      }
-   }
-   ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
-   return hr;
 }
 
 void
@@ -413,6 +404,7 @@ void gdikmt_d3dddi_destroy(struct gdikmt_device *_device)
 void
 gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
 {
+   list_inithead(&device->sharedAllocations);
    InitializeSRWLock(&device->qcdxSubmitLock);
    device->qcdxSubmitContext = NULL;
    device->base.destroy = gdikmt_d3dddi_destroy;

@@ -28,13 +28,17 @@
 
 
 #include "gdikmt/gdikmt.h"
-#include "frontend/sw_winsys.h"
 #include "util/u_debug.h"
 #include "target-helpers/inline_debug_helper.h"
+#ifdef GALLIUM_LLVMPIPE
 #include "llvmpipe/lp_public.h"
+#endif
+#ifdef GALLIUM_SOFTPIPE
 #include "softpipe/sp_public.h"
-#include "sw/gdi/gdi_sw_winsys.h"
+#endif
+#ifdef GALLIUM_VIRGL
 #include "virgl/gdi/virgl_gdi_public.h"
+#endif
 #ifdef GALLIUM_FREEDRENO
 #include <unistd.h>
 #include "xf86drm.h"
@@ -74,69 +78,48 @@ d3d10_fd_escape(void *ctx, void *data, unsigned size)
 }
 #endif
 
-#include "winddk_compat.h"
-#include <d3dkmthk.h>
-
 extern struct pipe_screen *
-d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm);
+d3d10_create_screen(struct gdikmt_device* device);
 
 void
-d3d10_destroy_screen(struct pipe_screen *screen, struct sw_winsys *vidmm)
+d3d10_destroy_screen(struct pipe_screen *screen)
 {
    screen->destroy(screen);
-   if (vidmm)
-      vidmm->destroy(vidmm);
 #if defined(GALLIUM_FREEDRENO) && !defined(GALLIUM_VIRGL)
    glsl_type_singleton_decref();
 #endif
 }
 
-HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
+#if !defined(GALLIUM_FREEDRENO) && !defined(GALLIUM_VIRGL)
+#include "frontend/sw_winsys.h"
+#include "sw/gdi/gdi_sw_winsys.h"
+#include "winddk_compat.h"
+#include <d3dkmthk.h>
+
+static HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
 
    HWND hWnd = pPresentInfo->hWindow;
    return GetDC(hWnd);
 }
 
-void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
+static void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
 
    HWND hWnd = pPresentInfo->hWindow;
    ReleaseDC(hWnd, hDC);
 }
 
-struct pipe_screen *
-d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm)
-{
-   const char *default_driver;
-   const char *driver;
-   struct pipe_screen *screen = NULL;
-   struct sw_winsys *winsys;
+#endif
 
+struct pipe_screen *
+d3d10_create_screen(struct gdikmt_device* device)
+{
 #ifdef GALLIUM_VIRGL
    return virgl_gdi_screen_create(device);
-#endif
-#ifdef GALLIUM_FREEDRENO
+#elif defined(GALLIUM_FREEDRENO)
    {
-      unsigned vidmm_features;
-      int fd = fd_wddm_open(d3d10_fd_escape, device, &vidmm_features);
-#ifdef GALLIUM_SOFTPIPE
-      if (fd < 0 && vidmm_features) {
-         extern struct sw_winsys *qcdx_create_vidmm_winsys(struct gdikmt_device *, unsigned);
-         winsys = qcdx_create_vidmm_winsys(device, vidmm_features);
-         if (!winsys)
-            return NULL;
-         glsl_type_singleton_init_or_ref();
-         screen = softpipe_create_screen(winsys);
-         if (!screen) {
-            glsl_type_singleton_decref();
-            winsys->destroy(winsys);
-            return NULL;
-         }
-         *vidmm = winsys;
-         return screen;
-      }
-#endif
+      int fd = fd_wddm_open(d3d10_fd_escape, device);
       if (fd < 0)
          return NULL;
       /* freedreno/NIR need the GLSL type cache; on Linux the GL frontend creates it */
@@ -144,7 +127,7 @@ d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm)
       driOptionCache info = {0}, options = {0};
       struct pipe_screen_config config = {.options_info = &info, .options = &options};
       driParseOptionInfo(&info, fd_driconf, ARRAY_SIZE(fd_driconf));
-      screen = fd_screen_create(fd, &config, NULL);
+      struct pipe_screen *screen = fd_screen_create(fd, &config, NULL);
       /* fd_screen_create takes its own duplicate and copies the options. */
       fd_wddm_close(fd);
       driDestroyOptionCache(&options);
@@ -155,10 +138,11 @@ d3d10_create_screen(struct gdikmt_device* device, struct sw_winsys **vidmm)
          glsl_type_singleton_decref();
       return screen;
    }
-#endif
-
-
-   winsys = gdi_create_sw_winsys(d3d10_gdi_acquire_hdc, d3d10_gdi_release_hdc);
+#else
+   const char *default_driver;
+   const char *driver;
+   struct pipe_screen *screen = NULL;
+   struct sw_winsys *winsys = gdi_create_sw_winsys(d3d10_gdi_acquire_hdc, d3d10_gdi_release_hdc);
    if(!winsys)
       goto no_winsys;
 
@@ -193,4 +177,5 @@ no_screen:
    winsys->destroy(winsys);
 no_winsys:
    return NULL;
+#endif
 }

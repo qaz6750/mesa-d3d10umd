@@ -214,23 +214,8 @@ new_handle(struct fd_device *dev, uint32_t size, uint32_t flags, uint32_t *handl
    return 0;
 }
 
-/* allocate a new buffer object */
-struct fd_bo *
-msm_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
-{
-   uint32_t handle;
-   int ret;
-
-   ret = new_handle(dev, size, flags, &handle);
-   if (ret)
-      return NULL;
-
-   return msm_bo_from_handle(dev, size, handle);
-}
-
-/* allocate a new buffer object from existing handle (import) */
-struct fd_bo *
-msm_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
+static struct fd_bo *
+wrap_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
 {
    struct msm_bo *msm_bo;
    struct fd_bo *bo;
@@ -246,5 +231,41 @@ msm_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
 
    fd_bo_init_common(bo, dev);
 
+   return bo;
+}
+
+/* allocate a new buffer object */
+struct fd_bo *
+msm_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
+{
+   uint32_t handle;
+   int ret;
+
+   ret = new_handle(dev, size, flags, &handle);
+   if (ret)
+      return NULL;
+
+   struct fd_bo *bo = wrap_handle(dev, size, handle);
+   if (!bo) {
+      struct drm_gem_close close = { .handle = handle };
+      drmIoctl(dev->fd, DRM_IOCTL_GEM_CLOSE, &close);
+   }
+   return bo;
+}
+
+struct fd_bo *
+msm_bo_from_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
+{
+#ifdef FD_WDDM
+   /* The runtime may grant the importer read-only access to a writable BO. */
+   struct drm_msm_gem_info info = { .handle = handle, .info = MSM_INFO_GET_FLAGS };
+   if (drmCommandWriteRead(dev->fd, DRM_MSM_GEM_INFO, &info, sizeof(info)))
+      return NULL;
+#endif
+   struct fd_bo *bo = wrap_handle(dev, size, handle);
+#ifdef FD_WDDM
+   if (bo && (info.value & MSM_BO_GPU_READONLY))
+      bo->alloc_flags |= FD_BO_GPUREADONLY;
+#endif
    return bo;
 }

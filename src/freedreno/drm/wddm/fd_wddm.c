@@ -17,16 +17,17 @@
 #include "qcdx_escape.h"
 
 #define FD_WDDM_BASE   0x7000
-#define FD_WDDM_MAX    16
 
-static struct {
+struct fd_wddm_slot {
    fd_wddm_escape_fn escape;
    void *ctx;
    int refs;
    int handle;
    unsigned active;
    int detaching;
-} fds[FD_WDDM_MAX];
+};
+static struct fd_wddm_slot *fds;
+static int slot_count;
 static int next_fd = FD_WDDM_BASE;
 
 /* DWM creates/destroys D3D devices from several threads */
@@ -36,14 +37,59 @@ static int next_fd = FD_WDDM_BASE;
 static SRWLOCK fds_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE fds_drained = CONDITION_VARIABLE_INIT;
 
+/* In-flight escapes retain their slot index while a new D3D device can grow
+ * the table. Access the array only under fds_lock. */
+static int
+allocate_slot(fd_wddm_escape_fn escape, void *ctx)
+{
+   if (next_fd == INT_MAX) {
+      errno = EMFILE;
+      return -1;
+   }
+   int i = 0;
+   while (i < slot_count && (fds[i].refs || fds[i].active || fds[i].detaching))
+      ++i;
+   if (i == slot_count) {
+      if (slot_count > INT_MAX / 2 || (size_t)slot_count > SIZE_MAX / sizeof(*fds) / 2) {
+         errno = EMFILE;
+         return -1;
+      }
+      int capacity = slot_count ? slot_count * 2 : 16;
+      struct fd_wddm_slot *slots = realloc(fds, (size_t)capacity * sizeof(*fds));
+      if (!slots) {
+         errno = ENOMEM;
+         return -1;
+      }
+      fds = slots;
+      memset(fds + slot_count, 0, (capacity - slot_count) * sizeof(*fds));
+      slot_count = capacity;
+   }
+   fds[i].escape = escape;
+   fds[i].ctx = ctx;
+   fds[i].refs = 1;
+   fds[i].handle = next_fd++;
+   return fds[i].handle;
+}
+
+static void
+release_empty_table(void)
+{
+   for (int i = 0; i < slot_count; ++i) {
+      if (fds[i].refs || fds[i].active || fds[i].detaching)
+         return;
+   }
+   free(fds);
+   fds = NULL;
+   slot_count = 0;
+}
+
 int
-fd_wddm_open(fd_wddm_escape_fn escape, void *ctx, unsigned *vidmm_features)
+fd_wddm_open(fd_wddm_escape_fn escape, void *ctx)
 {
    struct qcdx_escape query = {0};
    struct qcdx_capabilities caps = {0};
    int ret = -1;
 
-   *vidmm_features = 0;
    if (!escape) {
       errno = EINVAL;
       return -1;
@@ -77,25 +123,12 @@ fd_wddm_open(fd_wddm_escape_fn escape, void *ctx, unsigned *vidmm_features)
       }
    }
    if ((caps.features & QCDX_CAP_RENDER_REQUIRED) != QCDX_CAP_RENDER_REQUIRED) {
-      if (caps.features & QCDX_CAP_VIDMM_PRESENT)
-         *vidmm_features = caps.features;
       errno = ENOTSUP;
       return -1;
    }
    AcquireSRWLockExclusive(&fds_lock);
-   for (int i = 0; i < FD_WDDM_MAX; i++) {
-      if (fds[i].refs == 0 && fds[i].active == 0 && !fds[i].detaching && next_fd < INT_MAX) {
-         fds[i].escape = escape;
-         fds[i].ctx = ctx;
-         fds[i].refs = 1;
-         fds[i].handle = next_fd++;
-         ret = fds[i].handle;
-         break;
-      }
-   }
+   ret = allocate_slot(escape, ctx);
    ReleaseSRWLockExclusive(&fds_lock);
-   if (ret < 0)
-      errno = EMFILE;
    return ret;
 }
 
@@ -109,27 +142,17 @@ fd_wddm_dup(int fd)
       return _dup(fd);
    AcquireSRWLockExclusive(&fds_lock);
    original = -1;
-   for (int index = 0; index < FD_WDDM_MAX; index++) {
+   for (int index = 0; index < slot_count; index++) {
       if (fds[index].refs > 0 && fds[index].handle == fd) {
          original = index;
          break;
       }
    }
-   if (original >= 0 && next_fd < INT_MAX) {
-      for (int index = 0; index < FD_WDDM_MAX; index++) {
-         if (fds[index].refs == 0 && fds[index].active == 0 && !fds[index].detaching) {
-            fds[index].escape = fds[original].escape;
-            fds[index].ctx = fds[original].ctx;
-            fds[index].refs = 1;
-            fds[index].handle = next_fd++;
-            result = fds[index].handle;
-            break;
-         }
-      }
-   }
+   if (original >= 0)
+      result = allocate_slot(fds[original].escape, fds[original].ctx);
+   else
+      errno = EBADF;
    ReleaseSRWLockExclusive(&fds_lock);
-   if (result < 0)
-      errno = original < 0 ? EBADF : EMFILE;
    return result;
 }
 
@@ -139,7 +162,7 @@ fd_wddm_detach(void *ctx)
    int pending;
 
    AcquireSRWLockExclusive(&fds_lock);
-   for (int i = 0; i < FD_WDDM_MAX; i++) {
+   for (int i = 0; i < slot_count; i++) {
       if (fds[i].ctx == ctx && fds[i].escape) {
          fds[i].detaching = 1;
          fds[i].refs = 0;
@@ -147,7 +170,7 @@ fd_wddm_detach(void *ctx)
    }
    do {
       pending = 0;
-      for (int i = 0; i < FD_WDDM_MAX; i++) {
+      for (int i = 0; i < slot_count; i++) {
          if (fds[i].ctx == ctx && fds[i].detaching && fds[i].active != 0) {
             pending = 1;
             break;
@@ -156,20 +179,21 @@ fd_wddm_detach(void *ctx)
       if (pending)
          SleepConditionVariableSRW(&fds_drained, &fds_lock, INFINITE, 0);
    } while (pending);
-   for (int i = 0; i < FD_WDDM_MAX; i++) {
+   for (int i = 0; i < slot_count; i++) {
       if (fds[i].ctx == ctx && fds[i].detaching) {
          fds[i].escape = NULL;
          fds[i].ctx = NULL;
          fds[i].detaching = 0;
       }
    }
+   release_empty_table();
    ReleaseSRWLockExclusive(&fds_lock);
 }
 
 static int
 slot(int fd)
 {
-   for (int index = 0; index < FD_WDDM_MAX; index++) {
+   for (int index = 0; index < slot_count; index++) {
       if (fds[index].refs > 0 && fds[index].handle == fd)
          return index;
    }
@@ -188,6 +212,7 @@ fd_wddm_close(int fd)
    if (index >= 0 && --fds[index].refs == 0 && fds[index].active == 0 && !fds[index].detaching) {
       fds[index].escape = NULL;
       fds[index].ctx = NULL;
+      release_empty_table();
    }
    ReleaseSRWLockExclusive(&fds_lock);
    if (index < 0) {
@@ -294,6 +319,7 @@ esc(int fd, unsigned nr, void *data, unsigned size)
       if (fds[index].refs == 0 && !fds[index].detaching) {
          fds[index].escape = NULL;
          fds[index].ctx = NULL;
+         release_empty_table();
       }
       WakeAllConditionVariable(&fds_drained);
    }
@@ -405,21 +431,35 @@ int
 munmap(void *addr, size_t length)
 {
    struct qcdx_mmap m = { 0, length, (unsigned long long)(uintptr_t)addr };
-   int handles[FD_WDDM_MAX];
+   int local[16];
+   int *handles = local;
    unsigned count = 0;
 
    AcquireSRWLockShared(&fds_lock);
-   for (int index = 0; index < FD_WDDM_MAX; index++) {
+   if (slot_count > 16) {
+      handles = malloc((size_t)slot_count * sizeof(*handles));
+      if (!handles) {
+         ReleaseSRWLockShared(&fds_lock);
+         errno = ENOMEM;
+         return -1;
+      }
+   }
+   for (int index = 0; index < slot_count; index++) {
       if (fds[index].refs > 0)
          handles[count++] = fds[index].handle;
    }
    ReleaseSRWLockShared(&fds_lock);
    /* the mapping belongs to whichever device made it: try every open one */
+   int result = -1;
    for (unsigned index = 0; index < count; index++) {
-      if (esc(handles[index], QCDX_NR_MUNMAP, &m, sizeof(m)) == 0)
-         return 0;
+      if (esc(handles[index], QCDX_NR_MUNMAP, &m, sizeof(m)) == 0) {
+         result = 0;
+         break;
+      }
    }
-   return -1;
+   if (handles != local)
+      free(handles);
+   return result;
 }
 
 /* ---- POSIX bits freedreno needs on Windows (see include/) ---- */

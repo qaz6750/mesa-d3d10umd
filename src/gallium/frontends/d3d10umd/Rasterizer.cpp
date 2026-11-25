@@ -410,7 +410,7 @@ SetScissorRects(D3D10DDI_HDEVICE hDevice,                            // IN
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
    struct pipe_scissor_state states[PIPE_MAX_VIEWPORTS];
-   const bool fixGpuScissor = !CastDevice(hDevice)->vidmmWinsys && topaz_scfix_on();
+   const bool fixGpuScissor = topaz_scfix_on();
 
    ASSERT(NumScissorRects + ClearScissorRects <=
           D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);

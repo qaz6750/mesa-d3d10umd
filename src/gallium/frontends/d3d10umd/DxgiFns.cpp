@@ -71,11 +71,11 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
    struct Device *device = CastDevice(pPresentData->hDevice);
    Resource *pSrcResource = CastResource(pPresentData->hSurfaceToPresent);
    Resource *pDst = pPresentData->hDstResource ? CastResource(pPresentData->hDstResource) : NULL;
-   UINT src = pSrcResource ? pSrcResource->hAllocation : 0;
-   UINT dst = pDst ? pDst->hAllocation : 0;
+   UINT src = pSrcResource ? pSrcResource->shared.handle : 0;
+   UINT dst = pDst ? pDst->shared.handle : 0;
    QcdxTraceDisplay(&device->device, QCDX_PRESENT_BEGIN, src, dst, pPresentData->Flags.Value, S_OK);
 
-   if (pSrcResource && pSrcResource->hAllocation) {
+   if (pSrcResource && pSrcResource->shared.handle) {
       TopazStripsRestore(device);
       TopazMaybeDump(device->pipe, pSrcResource->resource);
       HRESULT hr = QcdxWddmPresent(device, pSrcResource, pDst, pPresentData->pDXGIContext);
@@ -83,7 +83,7 @@ _Present(DXGI_DDI_ARG_PRESENT *pPresentData)
       static unsigned n;
       if (++n <= 60 || FAILED(hr) || getenv("QCDX_DRAWLOG"))
          QcdxWddmLogf("DXGI Present #%u res %p alloc 0x%x dst %p flags 0x%x -> 0x%08lx\n", n, pSrcResource->resource,
-                       pSrcResource->hAllocation, pPresentData->hDstResource, pPresentData->Flags.Value, (unsigned long)hr);
+                       pSrcResource->shared.handle, pPresentData->hDstResource, pPresentData->Flags.Value, (unsigned long)hr);
       return hr;
    }
    QcdxWddmLogf("DXGI Present rejected: missing WDDM source allocation\n");
@@ -143,11 +143,11 @@ _SetDisplayMode( DXGI_DDI_ARG_SETDISPLAYMODE *SetDisplayMode )
 
    Device* device = CastDevice(SetDisplayMode->hDevice);
    Resource *res = CastResource(SetDisplayMode->hResource);
-   D3DKMT_HANDLE allocation = res->hAllocation;
+   D3DKMT_HANDLE allocation = res->shared.handle;
    if (!device->device.KTCallbacks.pfnSetDisplayModeCb)
       return DXGI_DDI_ERR_UNSUPPORTED;
    if (!allocation) {
-      if (device->vidmmWinsys || !res->resource || !device->screen->resource_get_handle)
+      if (!res->resource || !device->screen->resource_get_handle)
          return E_INVALIDARG;
       struct winsys_handle handle = {};
       handle.type = WINSYS_HANDLE_TYPE_D3DKMT_ALLOC;
@@ -228,7 +228,7 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
 
    for (UINT i = 0; i < count; ++i) {
       Resource *r = CastResource(args->pResources[i]);
-      if (!r || !r->resource || !r->hAllocation || r->NumSubResources != 1 ||
+      if (!r || !r->resource || !r->shared.handle || r->NumSubResources != 1 ||
           !r->transfers || r->transfers[0] || r->resource->target != PIPE_TEXTURE_2D ||
           r->resource->screen != first->resource->screen || r->resource->nr_samples != first->resource->nr_samples ||
           r->resource->format != first->resource->format || r->resource->width0 != first->resource->width0 ||
@@ -253,10 +253,22 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
    fd_resource_rotate_storage(device->pipe, storage, count);
    if (storage != stack)
       free(storage);
-   D3DKMT_HANDLE firstHandle = first->hAllocation;
-   for (UINT i = 1; i < count; ++i)
-      CastResource(args->pResources[i - 1])->hAllocation = CastResource(args->pResources[i])->hAllocation;
-   CastResource(args->pResources[count - 1])->hAllocation = firstHandle;
+   AcquireSRWLockExclusive(&device->device.qcdxSubmitLock);
+   D3DKMT_HANDLE firstHandle = first->shared.handle;
+   unsigned firstBo = first->shared.boName;
+   uint64_t firstMapping = first->shared.systemMemoryMapping;
+   for (UINT i = 1; i < count; ++i) {
+      Resource *left = CastResource(args->pResources[i - 1]);
+      Resource *right = CastResource(args->pResources[i]);
+      left->shared.handle = right->shared.handle;
+      left->shared.boName = right->shared.boName;
+      left->shared.systemMemoryMapping = right->shared.systemMemoryMapping;
+   }
+   Resource *last = CastResource(args->pResources[count - 1]);
+   last->shared.handle = firstHandle;
+   last->shared.boName = firstBo;
+   last->shared.systemMemoryMapping = firstMapping;
+   ReleaseSRWLockExclusive(&device->device.qcdxSubmitLock);
    return S_OK;
 }
 
@@ -270,9 +282,9 @@ _RotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *args)
       return S_OK;
 
    Device *device = CastDevice(args->hDevice);
-   HRESULT hr = device->vidmmWinsys ? QcdxWddmRotateVidmm(device, args) : RotateGpuStorage(device, args);
+   HRESULT hr = RotateGpuStorage(device, args);
    Resource *first = CastResource(args->pResources[0]);
-   QcdxTraceDisplay(&device->device, QCDX_ROTATE, first ? first->hAllocation : 0, args->Resources, 0, hr);
+   QcdxTraceDisplay(&device->device, QCDX_ROTATE, first ? first->shared.handle : 0, args->Resources, 0, hr);
    return hr;
 }
 
@@ -408,17 +420,10 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
    const bool sameTexture = src->resource == dst->resource;
    const bool sameSubresource = sameTexture && Blt->SrcSubresource == Blt->DstSubresource;
    const bool mayAlias = sameTexture ? sameSubresource :
-      src->hAllocation && dst->hAllocation && (!device->vidmmWinsys || QcdxVidmmMayAlias(src, dst));
+      src->shared.boName && src->shared.boName == dst->shared.boName;
    if (sameSubresource && !rotated && !Blt->Flags.Resolve &&
        blit.src.box.width == width && blit.src.box.height == height)
       return S_OK;
-   if (!rotated && !Blt->Flags.Resolve && !Blt->SrcSubresource && !Blt->DstSubresource &&
-       blit.src.box.width == width && blit.src.box.height == height) {
-      qcdx_copy_region region = {0, 0, Blt->DstLeft, Blt->DstTop, (unsigned)width, (unsigned)height};
-      HRESULT hr = QcdxVidmmBlit(device, dst->resource, src->resource, nullptr, &region);
-      if (hr != S_FALSE)
-         return hr;
-   }
    if (mayAlias) {
       HRESULT hr = QcdxWddmFinishResource(device, dst);
       if (FAILED(hr))
@@ -431,8 +436,7 @@ BltResources(Device *device, Resource *src, Resource *dst, const DXGI_DDI_ARG_BL
       device->pipe->resource_copy_region(device->pipe, blit.dst.resource, blit.dst.level,
          blit.dst.box.x, blit.dst.box.y, blit.dst.box.z, blit.src.resource, blit.src.level, &blit.src.box);
    } else {
-      if ((device->vidmmWinsys && Blt->Flags.Resolve) ||
-          !device->screen->is_format_supported(device->screen, blit.src.format, blit.src.resource->target,
+      if (!device->screen->is_format_supported(device->screen, blit.src.format, blit.src.resource->target,
              blit.src.resource->nr_samples, blit.src.resource->nr_storage_samples, PIPE_BIND_SAMPLER_VIEW) ||
           !device->screen->is_format_supported(device->screen, blit.dst.format, blit.dst.resource->target,
              blit.dst.resource->nr_samples, blit.dst.resource->nr_storage_samples, PIPE_BIND_RENDER_TARGET))
@@ -475,7 +479,7 @@ _Blt(DXGI_DDI_ARG_BLT *args)
    Device *device = CastDevice(args->hDevice);
    Resource *src = CastResource(args->hSrcResource), *dst = CastResource(args->hDstResource);
    HRESULT hr = BltResources(device, src, dst, args);
-   QcdxTraceDisplay(&device->device, QCDX_BLT, src ? src->hAllocation : 0,
-                    dst ? dst->hAllocation : 0, args->Flags.Value, hr);
+   QcdxTraceDisplay(&device->device, QCDX_BLT, src ? src->shared.handle : 0,
+                    dst ? dst->shared.handle : 0, args->Flags.Value, hr);
    return hr;
 }

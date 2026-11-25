@@ -269,10 +269,7 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
       SetErrorAt(hDevice, hr, "CreateResource", line);
    };
    bool topazNoScanout = false;
-   unsigned primaryFormat = pCreateResource->pPrimaryDesc ?
-      QcdxD3dFormat(FormatTranslate(pCreateResource->Format, false)) : 0;
-   if (pCreateResource->pPrimaryDesc &&
-       (!device->vidmmWinsys || (primaryFormat != 21 && primaryFormat != 22) || QcdxWddmNoFlip())) {
+   if (pCreateResource->pPrimaryDesc) {
       pCreateResource->pPrimaryDesc->DriverFlags = DXGI_DDI_PRIMARY_DRIVER_FLAG_NO_SCANOUT;
       if (!(pCreateResource->pPrimaryDesc->Flags & DXGI_DDI_PRIMARY_OPTIONAL)) {
          QcdxWddmLogf("  primary without PRIMARY_OPTIONAL -> DXGI_DDI_ERR_UNSUPPORTED (no-flip mode)\n");
@@ -321,12 +318,6 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    }
    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
       templat.bind |= PIPE_BIND_SHARED;
-   }
-   if (device->vidmmWinsys && QcdxWddmWanted(pCreateResource) &&
-       (templat.target != PIPE_TEXTURE_2D || templat.last_level || templat.nr_samples > 1 ||
-        !QcdxD3dFormat(templat.format))) {
-      reportError(DXGI_DDI_ERR_UNSUPPORTED, __LINE__);
-      goto unlock;
    }
    if (templat.target != PIPE_BUFFER && QcdxWddmWanted(pCreateResource)) {
       QcdxWddmTemplate(&templat);
@@ -575,8 +566,10 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
    }
    free(pResource->transfers);
 
-   if (pResource->hAllocation)
-      pipe->flush(pipe, NULL, 0);
+   if (pResource->shared.handle) {
+      HRESULT hr = QcdxWddmFinishResource(CastDevice(hDevice), pResource);
+      SetError(hDevice, hr);
+   }
    pipe_resource_reference(&pResource->resource, NULL);
    QcdxWddmDestroyAllocation(CastDevice(hDevice), pResource);
 }
@@ -667,7 +660,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
    assert(SubResource < pResource->NumSubResources);
 
    /* qcdxkm: QCDX_MAPLOG=1 logs buffer maps (type, busy state as freedreno sees it) */
-   if (!CastDevice(hDevice)->vidmmWinsys && pResource->buffer && getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
+   if (pResource->buffer && getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
       static unsigned topazMaps;
       if (++topazMaps <= 40000)
       {
@@ -708,7 +701,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       return;
    }
 
-   if (!CastDevice(hDevice)->vidmmWinsys && pResource->buffer && DDIMap == D3D10_DDI_MAP_WRITE_DISCARD &&
+   if (pResource->buffer && DDIMap == D3D10_DDI_MAP_WRITE_DISCARD &&
        getenv("QCDX_MAPLOG") && getenv("QCDX_MAPLOG")[0] == '1') {
       void *bo; unsigned bm; int wb, busy;
       fd_resource_debug_state(resource, &bo, &bm, &wb, &busy);
@@ -846,11 +839,6 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    assert(dst_resource->last_level == src_resource->last_level);
    assert(dst_resource->array_size == src_resource->array_size);
 
-   HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr);
-   if (hr != S_FALSE) {
-      SetError(hDevice, hr);
-      return;
-   }
    compatible = areResourcesCompatible(src_resource, dst_resource);
 
    /* could also use one 3d copy for arrays */
@@ -940,16 +928,6 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
    }
 
-   if (!DstSubResource && !SrcSubResource && !DstZ &&
-       !src_box.z && src_box.depth == 1 && src_box.x >= 0 && src_box.y >= 0 && src_box.width > 0 && src_box.height > 0) {
-      qcdx_copy_region region = {(unsigned)src_box.x, (unsigned)src_box.y, DstX, DstY,
-                                 (unsigned)src_box.width, (unsigned)src_box.height};
-      HRESULT hr = QcdxVidmmBlit(pDevice, dst_resource, src_resource, nullptr, &region);
-      if (hr != S_FALSE) {
-         SetError(hDevice, hr);
-         return;
-      }
-   }
    if (areResourcesCompatible(src_resource, dst_resource)) {
       pipe->resource_copy_region(pipe,
                                  dst_resource, dst_level,

@@ -1,6 +1,14 @@
 #include "gdikmt/gdikmt.h"
+#include "util/list.h"
 #include <d3d10umddi.h>
 #include "freedreno/drm/wddm/qcdx_escape.h"
+
+struct qcdx_shared_allocation {
+   list_head link;
+   D3DKMT_HANDLE handle;
+   unsigned boName;
+   uint64_t systemMemoryMapping; /* Creator mapping passed to AllocateCb. */
+};
 
 struct gdikmt_device_d3dddi {  
    gdikmt_device base;
@@ -18,6 +26,7 @@ struct gdikmt_device_d3dddi {
    HANDLE hRTResource;
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
+   list_head sharedAllocations;
    SRWLOCK qcdxSubmitLock;
    struct gdikmt_context *qcdxSubmitContext;
 };
@@ -30,7 +39,5 @@ struct gdikmt_context_d3dddi {
 };
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
-HRESULT QcdxSubmitVidmmSurface(gdikmt_device_d3dddi *device, D3DKMT_HANDLE source,
-                               D3DKMT_HANDLE destination, unsigned color, const qcdx_copy_region *region = nullptr);
 void QcdxTraceDisplay(gdikmt_device_d3dddi *device, qcdx_display_event event,
                       UINT allocation, UINT detail, UINT flags, HRESULT hr);

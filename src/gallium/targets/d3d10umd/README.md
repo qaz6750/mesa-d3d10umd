@@ -1,3 +1,14 @@
+## QCDX ARM64 hardware driver
+
+The `build-support/qcdxkm8350-arm64.ini` profile builds `qcdx_d3d10.dll`
+with Freedreno and the ir3 shader compiler. Device creation requires the
+QCDX render capability mask `0x3f`. With a miniport reporting `0x3d3`, callers receive
+`DXGI_ERROR_UNSUPPORTED` from the UMD device-creation path. That miniport
+can accelerate desktop copies, but still needs user command submission,
+hardware fence support for those submissions and WDDM allocation integration.
+
+## Software driver builds
+
 When compiled with `gallium-driver=llvmpipe` or `gallium-driver=softpipe` the resulting libgallium_d3d10.dll implements D3D10's software rendering interface, like WARP.
 
 

@@ -258,14 +258,6 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
       clear_color.f[3] = pColorRGBA[3];
    }
 
-   Device *device = CastDevice(hDevice);
-   if (!device->pPredicate && surface->format == surface->texture->format) {
-      HRESULT hr = QcdxVidmmBlit(device, surface->texture, nullptr, pColorRGBA);
-      if (hr != S_FALSE) {
-         SetError(hDevice, hr);
-         return;
-      }
-   }
    pipe->clear_render_target(pipe,
                              surface,
                              &clear_color,

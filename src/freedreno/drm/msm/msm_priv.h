@@ -40,6 +40,16 @@
 
 #include "drm-uapi/msm_drm.h"
 
+static inline uint32_t
+msm_submit_bo_flags(const struct fd_bo *bo)
+{
+#ifdef FD_WDDM
+   if (bo->alloc_flags & FD_BO_GPUREADONLY)
+      return bo->reloc_flags & ~MSM_SUBMIT_BO_WRITE;
+#endif
+   return bo->reloc_flags;
+}
+
 struct msm_device {
    struct fd_device base;
 };

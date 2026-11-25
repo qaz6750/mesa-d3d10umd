@@ -51,8 +51,8 @@ extern "C" void fd_wddm_detach(void *ctx);   /* qcdxkm: freedreno/drm/wddm/fd_wd
 #include "gdikmt/gdikmt.h"
 
 EXTERN_C struct pipe_screen *
-d3d10_create_screen(gdikmt_device *device, struct sw_winsys **vidmm);
-EXTERN_C void d3d10_destroy_screen(struct pipe_screen *screen, struct sw_winsys *vidmm);
+d3d10_create_screen(gdikmt_device *device);
+EXTERN_C void d3d10_destroy_screen(struct pipe_screen *screen);
 
 static void APIENTRY DestroyDevice(D3D10DDI_HDEVICE hDevice);
 static void APIENTRY RelocateDeviceFuncs(D3D10DDI_HDEVICE hDevice,
@@ -76,7 +76,7 @@ ReleaseDeviceBackend(Device *device)
    if (device->pipe)
       device->pipe->destroy(device->pipe);
    if (device->screen)
-      d3d10_destroy_screen(device->screen, device->vidmmWinsys);
+      d3d10_destroy_screen(device->screen);
    if (device->topazCtx)
       device->topazCtx->destroy(device->topazCtx);
    fd_wddm_detach(&device->device.base);
@@ -180,7 +180,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (mtx_init(&pDevice->CreateResourceMtx, mtx_plain) != thrd_success)
       return E_OUTOFMEMORY;
 
-   struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base, &pDevice->vidmmWinsys);
+   struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base);
    if (!screen) {
       QcdxWddmLogf("CreateDevice DDI=0x%x: backend initialization failed\n", pCreateData->Interface);
       ReleaseDeviceBackend(pDevice);
@@ -363,8 +363,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    if (IS_DXGI1_1_BASE_FUNCTIONS(pCreateData->Interface, pCreateData->Version))
       pCreateData->DXGIBaseDDI.pDXGIDDIBaseFunctions2->pfnResolveSharedResource = _ResolveSharedResource;
 
-   QcdxWddmLogf("CreateDevice DDI=0x%x backend=%s VidMM=%u\n", pCreateData->Interface,
-                screen->get_name(screen), pDevice->vidmmWinsys != NULL);
+   QcdxWddmLogf("CreateDevice DDI=0x%x backend=%s\n", pCreateData->Interface,
+                screen->get_name(screen));
    return S_OK;
 }
 

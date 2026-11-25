@@ -1,6 +1,6 @@
 /*
- * A shared or presentable D3D resource has a WDDM allocation. Software devices
- * use VidMM storage directly. Freedreno BO imports use ExistingSysMem for
+ * A shared or presentable D3D resource has a WDDM allocation.
+ * Freedreno BO imports use ExistingSysMem for
  * non-primary surfaces. DXGI presents pass the runtime allocation handles.
  */
 
@@ -75,6 +75,32 @@ QcdxWddmTemplate(struct pipe_resource *templat)
    templat->bind |= PIPE_BIND_LINEAR | PIPE_BIND_SHARED;
 }
 
+static void
+TrackSharedAllocation(Device *device, Resource *resource, D3DKMT_HANDLE handle, unsigned boName)
+{
+   resource->shared.handle = handle;
+   resource->shared.boName = boName;
+   AcquireSRWLockExclusive(&device->device.qcdxSubmitLock);
+   list_addtail(&resource->shared.link, &device->device.sharedAllocations);
+   ReleaseSRWLockExclusive(&device->device.qcdxSubmitLock);
+}
+
+static void
+ReleaseSystemMemoryMapping(Device *device, uint64_t address)
+{
+   qcdx_mmap memory = {};
+   memory.addr = address;
+   qcdx_escape request = {};
+   request.magic = QCDX_ESC_MAGIC;
+   request.nr = QCDX_NR_MUNMAP;
+   request.size = sizeof(memory);
+   request.ret = -1;
+   memcpy(request.data, &memory, sizeof(memory));
+   NTSTATUS status = device->device.base.escape(&device->device.base, &request, sizeof(request));
+   if (status != STATUS_SUCCESS || request.ret)
+      QcdxWddmLogf("Release shared BO mapping: status 0x%08lx ret %d\n", (unsigned long)status, request.ret);
+}
+
 HRESULT
 QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG_CREATERESOURCE *pCreate,
                           bool noScanout)
@@ -88,15 +114,6 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    NTSTATUS st;
 
    memset(&wh, 0, sizeof(wh));
-   if (pDevice->vidmmWinsys) {
-      /* The display-target constructor has already called AllocateCb. */
-      pResource->hRTResource = pDevice->device.hRTResource;
-      wh.type = WINSYS_HANDLE_TYPE_D3DKMT_ALLOC;
-      if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh, 0))
-         return E_FAIL;
-      pResource->hAllocation = (D3DKMT_HANDLE)(uintptr_t)wh.handle;
-      return S_OK;
-   }
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
    if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh, 0)) {
       QcdxWddmLogf("topaz: resource_get_handle failed\n");
@@ -149,10 +166,12 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    opts.pAllocationInfo = &ai;
    st = pDevice->device.base.createAllocation(&pDevice->device.base, &opts);
    if (st < 0) {
+      ReleaseSystemMemoryMapping(pDevice, memory.addr);
       QcdxWddmLogf("topaz: AllocateCb failed 0x%08lx\n", (unsigned long)st);
       return E_OUTOFMEMORY;
    }
-   pResource->hAllocation = ai.hAllocation;
+   pResource->shared.systemMemoryMapping = memory.addr;
+   TrackSharedAllocation(pDevice, pResource, ai.hAllocation, a.bo);
    pResource->hRTResource = pDevice->device.hRTResource;
    return S_OK;
 }
@@ -160,19 +179,27 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
 void
 QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource)
 {
-   /* Device-private softpipe allocations are released by DestroySurface. */
-   if (pResource->hRTResource || (pResource->hAllocation && !pDevice->vidmmWinsys)) {
+   if (pResource->shared.link.next) {
+      AcquireSRWLockExclusive(&pDevice->device.qcdxSubmitLock);
+      list_del(&pResource->shared.link);
+      ReleaseSRWLockExclusive(&pDevice->device.qcdxSubmitLock);
+   }
+   if (pResource->hRTResource || pResource->shared.handle) {
       gdikmt_device *device = &pDevice->device.base;
-      HRESULT hr = device->destroyAllocation(device, pResource->hRTResource, pResource->hAllocation);
+      HRESULT hr = device->destroyAllocation(device, pResource->hRTResource, pResource->shared.handle);
       if (FAILED(hr)) {
          QcdxWddmLogf("DeallocateCb resource=%p allocation=%x hr=%08lx\n",
-                      pResource->hRTResource, pResource->hAllocation, (unsigned long)hr);
+                      pResource->hRTResource, pResource->shared.handle, (unsigned long)hr);
          if (hr == D3DDDIERR_DEVICEREMOVED)
             pDevice->UMCallbacks.pfnSetErrorCb(pDevice->hRTCoreLayer, hr);
+      } else if (pResource->shared.systemMemoryMapping) {
+         ReleaseSystemMemoryMapping(pDevice, pResource->shared.systemMemoryMapping);
       }
    }
+   pResource->shared.systemMemoryMapping = 0;
    pResource->hRTResource = NULL;
-   pResource->hAllocation = 0;
+   pResource->shared.handle = 0;
+   pResource->shared.boName = 0;
 }
 
 /* Open the storage described by Dxgkrnl for this device. */
@@ -194,7 +221,7 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    enum pipe_format format = TopazPipeFormat(a->format);
    if (format != PIPE_FORMAT_NONE && (a->flags & QCDX_ALLOC_F_SRGB))
       format = util_format_srgb(format);
-   if (format == PIPE_FORMAT_NONE || (!pDevice->vidmmWinsys && !a->bo))
+   if (format == PIPE_FORMAT_NONE || !a->bo)
       return DXGI_DDI_ERR_UNSUPPORTED;
    unsigned pixelBytes = util_format_get_blocksize(format);
    if (!a->width || !a->height || a->pitch % pixelBytes || (uint64_t)a->width * pixelBytes > a->pitch ||
@@ -210,14 +237,14 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    templat.last_level = 0;
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR | PIPE_BIND_SHARED;
    memset(&wh, 0, sizeof(wh));
-   wh.type = pDevice->vidmmWinsys ? WINSYS_HANDLE_TYPE_D3DKMT_ALLOC : WINSYS_HANDLE_TYPE_SHARED;
-   wh.handle = (HANDLE)(uintptr_t)(pDevice->vidmmWinsys ? info.hAllocation : a->bo);
+   wh.type = WINSYS_HANDLE_TYPE_SHARED;
+   wh.handle = (HANDLE)(uintptr_t)a->bo;
    wh.stride = a->pitch;
-   wh.offset = pDevice->vidmmWinsys ? 0 : a->bo_offset;
+   wh.offset = a->bo_offset;
    resource->resource = pDevice->screen->resource_from_handle(pDevice->screen, &templat, &wh, 0);
    if (!resource->resource)
       return E_OUTOFMEMORY;
-   resource->hAllocation = info.hAllocation;
+   TrackSharedAllocation(pDevice, resource, info.hAllocation, a->bo);
    return S_OK;
 }
 
@@ -256,8 +283,8 @@ _ResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *args)
       return E_INVALIDARG;
    Device *device = CastDevice(args->hDevice);
    Resource *resource = CastResource(args->hResource);
-   HRESULT hr = resource->hAllocation ? QcdxWddmFinishResource(device, resource) : E_INVALIDARG;
-   QcdxTraceDisplay(&device->device, QCDX_RESOLVE_SHARED, resource->hAllocation, resource->Format, 0, hr);
+   HRESULT hr = resource->shared.handle ? QcdxWddmFinishResource(device, resource) : E_INVALIDARG;
+   QcdxTraceDisplay(&device->device, QCDX_RESOLVE_SHARED, resource->shared.handle, resource->Format, 0, hr);
    return hr;
 }
 
@@ -266,16 +293,14 @@ ReportPresentTiming(Device *pDevice)
 {
    PresentTiming &timing = pDevice->timing;
    double ms = 1000.0 / timing.frequency.QuadPart;
-   if (!pDevice->vidmmWinsys) {
-      uint32_t ctl, last;
-      unsigned cs[6], ds[5];
-      fd_context_debug_fences(pDevice->pipe, &ctl, &last);
-      fd_bo_cache_debug_stats(cs);
-      fd_bo_del_debug_stats(ds);
-      QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
-                   " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
-                   ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
-   }
+   uint32_t ctl, last;
+   unsigned cs[6], ds[5];
+   fd_context_debug_fences(pDevice->pipe, &ctl, &last);
+   fd_bo_cache_debug_stats(cs);
+   fd_bo_del_debug_stats(ds);
+   QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
+                " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
+                ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
    QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, gpu wait %.2f, present cb %.2f, "
                 "map flushes/frame %.1f (%.2f ms/frame), draws/frame %.0f in %.2f ms\n",
                 timing.frameTicks * ms / 59, timing.flushTicks * ms / 60, timing.waitTicks * ms / 60,
@@ -293,7 +318,7 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    struct pipe_context *pipe = pDevice->pipe;
    struct pipe_fence_handle *fence = NULL;
 
-   if (!pSrc || !pSrc->hAllocation || (pDst && !pDst->hAllocation))
+   if (!pSrc || !pSrc->shared.handle || (pDst && !pDst->shared.handle))
       return E_INVALIDARG;
    PresentTiming &timing = pDevice->timing;
    LARGE_INTEGER begin, flushed, completed;
@@ -321,8 +346,8 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    {
       DXGIDDICB_PRESENT p;
       memset(&p, 0, sizeof(p));
-      p.hSrcAllocation = pSrc->hAllocation;
-      p.hDstAllocation = pDst ? pDst->hAllocation : 0;
+      p.hSrcAllocation = pSrc->shared.handle;
+      p.hDstAllocation = pDst ? pDst->shared.handle : 0;
       p.pDXGIContext = pDXGIContext;
       p.hContext = ((struct gdikmt_context_d3dddi *)pDevice->topazCtx)->hContext;
       LARGE_INTEGER callbackBegin, callbackEnd;
@@ -406,10 +431,4 @@ QcdxWddmLogf(const char *fmt, ...)
    va_start(ap, fmt);
    vfprintf(stderr, fmt, ap);
    va_end(ap);
-}
-
-bool
-QcdxWddmNoFlip(void)
-{
-   return GetFileAttributesA("C:\\qcdx\\umd.noflip") != INVALID_FILE_ATTRIBUTES;
 }
