@@ -290,7 +290,6 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    return S_OK;
 }
 
-extern "C" bool fd_wddm_fence_submitted(struct pipe_screen *, struct pipe_context *, struct pipe_fence_handle *);
 extern "C" void fd_bo_cache_debug_stats(unsigned *v);
 extern "C" void fd_bo_del_debug_stats(unsigned *v);
 extern "C" void fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last);

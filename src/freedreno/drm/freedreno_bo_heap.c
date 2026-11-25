@@ -239,6 +239,8 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
    }
 
    struct sa_bo *s = calloc(1, sizeof(*s));
+   if (!s)
+      goto fail;
 
    s->heap = heap;
    s->offset = offset;
@@ -248,11 +250,18 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
    if (HEAP_DEBUG)
       mesa_logi("alloc: %08x-%x idx=%d", s->offset, size, idx);
    if (!heap->blocks[idx]) {
-      heap->blocks[idx] = fd_bo_new(
+      struct fd_bo *block = fd_bo_new(
             heap->dev, FD_BO_HEAP_BLOCK_SIZE, heap->flags | _FD_BO_HINT_HEAP,
             "heap-%x-block-%u", heap->flags, idx);
+      if (!block)
+         goto fail;
+      if (!fd_bo_map(block)) {
+         fd_bo_del(block);
+         goto fail;
+      }
       if (heap->flags == RING_FLAGS)
-         fd_bo_mark_for_dump(heap->blocks[idx]);
+         fd_bo_mark_for_dump(block);
+      heap->blocks[idx] = block;
    }
    /* Take a reference to the backing obj: */
    fd_bo_ref(heap->blocks[idx]);
@@ -266,7 +275,7 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
    bo->alloc_flags = flags;
 
    /* Pre-initialize mmap ptr, to avoid trying to os_mmap() */
-   bo->map = ((uint8_t *)fd_bo_map(heap->blocks[idx])) + block_offset(s);
+   bo->map = ((uint8_t *)heap->blocks[idx]->map) + block_offset(s);
 
    fd_bo_init_common(bo, heap->dev);
 
@@ -275,4 +284,10 @@ fd_bo_heap_alloc(struct fd_bo_heap *heap, uint32_t size, uint32_t flags)
    fd_alloc_log(bo, FD_ALLOC_HEAP, FD_ALLOC_ACTIVE);
 
    return bo;
+
+fail:
+   free(s);
+   util_vma_heap_free(&heap->heap, offset, size);
+   simple_mtx_unlock(&heap->lock);
+   return NULL;
 }

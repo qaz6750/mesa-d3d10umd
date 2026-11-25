@@ -98,19 +98,19 @@ rebind_resource_in_ctx(struct fd_context *ctx,
 
    /* per-shader-stage resources: */
    for (unsigned stage = 0; stage < PIPE_SHADER_TYPES; stage++) {
-      /* Constbufs.. note that constbuf[0] is normal uniforms emitted in
-       * cmdstream rather than by pointer..
-       */
-      if ((rsc->dirty & FD_DIRTY_CONST) &&
-          !(ctx->dirty_shader[stage] & FD_DIRTY_CONST)) {
+      if (rsc->dirty & FD_DIRTY_CONST) {
          struct fd_constbuf_stateobj *cb = &ctx->constbuf[stage];
-         const unsigned num_ubos = util_last_bit(cb->enabled_mask);
-         for (unsigned i = 1; i < num_ubos; i++) {
-            if (cb->cb[i].buffer == prsc) {
-               fd_dirty_shader_resource(ctx, prsc, stage,
-                                        FD_DIRTY_SHADER_CONST, false);
-               break;
-            }
+         u_foreach_bit (i, cb->enabled_mask) {
+            if (cb->cb[i].buffer != prsc)
+               continue;
+
+            /* Rebinding can run before the old batch references are removed.
+             * Track the replacement on the next draw even if this batch
+             * already reads the old storage at the same binding. */
+            fd_context_dirty_shader(ctx, stage, FD_DIRTY_SHADER_CONST);
+            ctx->dirty_shader_resource[stage] |= FD_DIRTY_SHADER_CONST;
+            ctx->dirty_resource |= FD_DIRTY_CONST;
+            break;
          }
       }
 
@@ -201,8 +201,8 @@ __fd_resource_wait(struct fd_context *ctx, struct fd_resource *rsc, unsigned op,
    return ret;
 }
 
-static void
-realloc_bo(struct fd_resource *rsc, uint32_t size)
+static bool
+realloc_bo(struct fd_resource *rsc, uint32_t size, bool rebind)
 {
    struct pipe_resource *prsc = &rsc->b.b;
    struct fd_screen *screen = fd_screen(rsc->b.b.screen);
@@ -220,12 +220,16 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
     * be sure to check for PIPE_RESOURCE_FLAG_MAP_COHERENT
     */
 
-   if (rsc->bo)
-      fd_bo_del(rsc->bo);
-
    struct fd_bo *bo =
       fd_bo_new(screen->dev, size, flags, "%ux%ux%u@%u:%x", prsc->width0,
                 prsc->height0, prsc->depth0, rsc->layout.cpp, prsc->bind);
+   if (rebind) {
+      if (!bo)
+         return false;
+      rebind_resource(rsc);
+   }
+   if (rsc->bo)
+      fd_bo_del(rsc->bo);
    fd_resource_set_bo(rsc, bo);
 
    /* Zero out the UBWC area on allocation.  This fixes intermittent failures
@@ -241,6 +245,7 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
 
    util_range_set_empty(&rsc->valid_buffer_range);
    fd_bc_invalidate_resource(rsc, true);
+   return bo != NULL;
 }
 
 static void
@@ -751,18 +756,17 @@ fd_resource_transfer_unmap(struct pipe_context *pctx,
    slab_free(&ctx->transfer_pool, ptrans);
 }
 
-static void
+static bool
 invalidate_resource(struct fd_resource *rsc, unsigned usage) assert_dt
 {
    bool needs_flush = pending(rsc, !!(usage & PIPE_MAP_WRITE));
    unsigned op = translate_usage(usage);
 
-   if (needs_flush || resource_busy(rsc, op)) {
-      rebind_resource(rsc);
-      realloc_bo(rsc, fd_bo_size(rsc->bo));
-   } else {
-      util_range_set_empty(&rsc->valid_buffer_range);
-   }
+   if (needs_flush || resource_busy(rsc, op))
+      return realloc_bo(rsc, fd_bo_size(rsc->bo), true);
+
+   util_range_set_empty(&rsc->valid_buffer_range);
+   return true;
 }
 
 static bool
@@ -835,8 +839,11 @@ resource_transfer_map_unsync(struct pipe_context *pctx,
     * because it was allocated without the VIRTGPU_BLOB_FLAG_USE_MAPPABLE
     * flag.  So we need end up needing to do a staging blit instead:
     */
-   if (!buf)
+   if (!buf) {
+      if (prsc->target == PIPE_BUFFER)
+         return NULL;
       return resource_transfer_map_staging(pctx, prsc, level, usage, box, trans);
+   }
 
    offset = box->y / util_format_get_blockheight(format) * trans->b.b.stride +
             box->x / util_format_get_blockwidth(format) * rsc->layout.cpp +
@@ -886,9 +893,8 @@ resource_transfer_map(struct pipe_context *pctx, struct pipe_resource *prsc,
                      prsc, level, usage, box->width, box->height, box->x, box->y);
    }
 
-   if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) {
-      invalidate_resource(rsc, usage);
-   } else {
+   /* If renaming runs out of memory, synchronize the original storage. */
+   if (!(usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE) || !invalidate_resource(rsc, usage)) {
       unsigned op = translate_usage(usage);
       bool needs_flush = pending(rsc, !!(usage & PIPE_MAP_WRITE));
 
@@ -1170,7 +1176,7 @@ fd_resource_resize(struct pipe_resource *prsc, uint32_t sz)
    assert(prsc->bind == PIPE_BIND_QUERY_BUFFER);
 
    prsc->width0 = sz;
-   realloc_bo(rsc, fd_screen(prsc->screen)->setup_slices(rsc));
+   realloc_bo(rsc, fd_screen(prsc->screen)->setup_slices(rsc), false);
 }
 
 static void
@@ -1468,8 +1474,7 @@ fd_resource_create_with_modifiers(struct pipe_screen *pscreen,
       return NULL;
    rsc = fd_resource(prsc);
 
-   realloc_bo(rsc, size);
-   if (!rsc->bo)
+   if (!realloc_bo(rsc, size, false))
       goto fail;
 
    return prsc;

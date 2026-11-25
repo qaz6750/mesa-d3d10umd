@@ -456,6 +456,7 @@ void QcdxWddmTemplate(struct pipe_resource *templat);
 HRESULT QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG_CREATERESOURCE *pCreate, bool noScanout);
 void QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource);
 HRESULT QcdxWddmOpen(Device *device, const D3D10DDIARG_OPENRESOURCE *open, Resource *resource);
+extern "C" bool fd_wddm_fence_submitted(struct pipe_screen *, struct pipe_context *, struct pipe_fence_handle *);
 HRESULT QcdxWddmFinishResource(Device *device, Resource *resource);
 HRESULT QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext);
 void QcdxWddmLogInit(void);

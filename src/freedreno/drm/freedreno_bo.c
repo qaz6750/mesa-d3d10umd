@@ -187,7 +187,8 @@ _fd_bo_new(struct fd_device *dev, uint32_t size, uint32_t flags)
 void
 _fd_bo_set_name(struct fd_bo *bo, const char *fmt, va_list ap)
 {
-   bo->funcs->set_name(bo, fmt, ap);
+   if (bo)
+      bo->funcs->set_name(bo, fmt, ap);
 }
 
 /* internal function to allocate bo's that use the ringbuffer cache

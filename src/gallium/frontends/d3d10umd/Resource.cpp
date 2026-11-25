@@ -192,18 +192,11 @@ subResourceBox(struct pipe_resource *resource, // IN
  */
 
 static HRESULT
-LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
+LockVidmmAllocation(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
 {
    if (resource->vidmmLocked || !device->device.KTCallbacks.pfnLockCb ||
        !device->device.KTCallbacks.pfnUnlockCb)
       return E_INVALIDARG;
-   struct pipe_fence_handle *fence = NULL;
-   device->pipe->flush(device->pipe, &fence, 0);
-   if (!fence) return E_FAIL;
-   bool ready = device->screen->fence_finish(device->screen, device->pipe, fence,
-                                             doNotWait ? 0 : UINT64_MAX);
-   device->screen->fence_reference(device->screen, &fence, NULL);
-   if (!ready) return doNotWait ? DXGI_ERROR_WAS_STILL_DRAWING : E_FAIL;
    D3DDDICB_LOCK lock = {};
    lock.hAllocation = resource->shared.handle;
    lock.Flags.LockEntire = TRUE;
@@ -216,6 +209,21 @@ LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait
       *data = lock.pData;
    }
    return hr;
+}
+
+static HRESULT
+LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
+{
+   struct pipe_fence_handle *fence = NULL;
+   device->pipe->flush(device->pipe, &fence, 0);
+   if (!fence) return E_FAIL;
+   // The allocation list on RenderCb carries the read/write hazard to LockCb.
+   // Keep the zero-timeout poll for callers that cannot wait for submission.
+   bool ready = doNotWait ? device->screen->fence_finish(device->screen, device->pipe, fence, 0)
+                          : fd_wddm_fence_submitted(device->screen, device->pipe, fence);
+   device->screen->fence_reference(device->screen, &fence, NULL);
+   if (!ready) return doNotWait ? DXGI_ERROR_WAS_STILL_DRAWING : E_FAIL;
+   return LockVidmmAllocation(device, resource, mode, doNotWait, data);
 }
 
 static HRESULT
@@ -417,7 +425,8 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
 
    if (pCreateResource->pInitialDataUP && pResource->shared.vidmmPitch) {
       void *pixels = NULL;
-      HRESULT hr = LockVidmm(device, pResource, D3D10_DDI_MAP_WRITE, false, &pixels);
+      // This new allocation has never been bound for drawing.
+      HRESULT hr = LockVidmmAllocation(device, pResource, D3D10_DDI_MAP_WRITE, false, &pixels);
       if (SUCCEEDED(hr)) {
          const auto &input = pCreateResource->pInitialDataUP[0];
          util_copy_rect((uint8_t *)pixels, templat.format, pResource->shared.vidmmPitch, 0, 0,
@@ -1159,18 +1168,20 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    /* qcdxkm experiment QCDX_UPDSYNC=1: texture updates without DISCARD_RANGE (no shadow/staging path in
     * freedreno, plain synchronized write) - dashed strokes inside window contents? */
    unsigned updFlags = PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE;
-   /* qcdxkm experiment QCDX_UPDFLUSH: 1 = flush before UpdateSubresourceUP of constant buffers,
-    * 2 = of any buffer, 3 = of anything */
-   {
-      /* default 1: freedreno does not see that pending draws read a constant buffer that DWM rewrites with
-       * UpdateSubresourceUP and wrote it in place (stale/zoomed windows, clipped shadows). ~1 flush/frame. */
-      const char *uf = getenv("QCDX_UPDFLUSH");
-      char m = uf ? uf[0] : '1';
-      if ((m == '1' && (dst_resource->bind & PIPE_BIND_CONSTANT_BUFFER)) ||
-          (m == '2' && pDstResource->buffer) || m == '3') {
-         pipe->flush(pipe, NULL, 0);
-         if (pDevice->timing.frequency.QuadPart) ++pDevice->timing.mapFlushes;
-      }
+   const bool constants = pDstResource->buffer && (dst_resource->bind & PIPE_BIND_CONSTANT_BUFFER);
+   const bool wholeConstants = constants && !(dst_resource->bind & PIPE_BIND_SHARED) &&
+                               box.x == 0 && (unsigned)box.width == dst_resource->width0;
+   // A draw keeps its old BO when a complete constant update renames storage.
+   // A partial update must preserve the other bytes in the existing buffer.
+   if (constants)
+      updFlags = wholeConstants ? PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE : PIPE_MAP_WRITE;
+
+   const char *uf = getenv("QCDX_UPDFLUSH");
+   char m = uf ? uf[0] : (wholeConstants ? '0' : '1');
+   if ((m == '1' && constants) ||
+       (m == '2' && pDstResource->buffer) || m == '3') {
+      pipe->flush(pipe, NULL, 0);
+      if (pDevice->timing.frequency.QuadPart) ++pDevice->timing.mapFlushes;
    }
    if (!pDstResource->buffer && getenv("QCDX_UPDSYNC") && getenv("QCDX_UPDSYNC")[0] == '1')
       updFlags = PIPE_MAP_WRITE;
@@ -1178,7 +1189,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       map = pipe->buffer_map(pipe,
                               dst_resource,
                               level,
-                              PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE,
+                              updFlags,
                               &box,
                               &transfer);
    } else {
@@ -1189,24 +1200,25 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
                               &box,
                               &transfer);
    }
-   assert(map);
-   if (map) {
-      for (int z = 0; z < box.depth; ++z) {
-         uint8_t *dst = (uint8_t*)map + z*transfer->layer_stride;
-         const uint8_t *src = (const uint8_t*)pSysMemUP + z*DepthPitch;
-         util_copy_rect(dst,
-                        dst_resource->format,
-                        transfer->stride,
-                        0, 0, box.width, box.height,
-                        src,
-                        RowPitch,
-                        0, 0);
-      }
-      if (pDstResource->buffer) {
-         pipe_buffer_unmap(pipe, transfer);
-      } else {
-         pipe_texture_unmap(pipe, transfer);
-      }
+   if (!map) {
+      SetError(hDevice, E_FAIL);
+      return;
+   }
+   for (int z = 0; z < box.depth; ++z) {
+      uint8_t *dst = (uint8_t*)map + z*transfer->layer_stride;
+      const uint8_t *src = (const uint8_t*)pSysMemUP + z*DepthPitch;
+      util_copy_rect(dst,
+                     dst_resource->format,
+                     transfer->stride,
+                     0, 0, box.width, box.height,
+                     src,
+                     RowPitch,
+                     0, 0);
+   }
+   if (pDstResource->buffer) {
+      pipe_buffer_unmap(pipe, transfer);
+   } else {
+      pipe_texture_unmap(pipe, transfer);
    }
 }
 
