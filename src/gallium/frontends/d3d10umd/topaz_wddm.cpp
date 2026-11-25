@@ -1,6 +1,6 @@
 /*
  * A shared or presentable D3D resource has a WDDM allocation.
- * Single-surface presents use VidMM storage with a linear Freedreno mirror.
+ * Single-surface shared and presentable textures use VidMM storage with a linear Freedreno mirror.
  * DXGI presents pass the runtime allocation handles.
  */
 
@@ -114,9 +114,13 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    NTSTATUS st;
 
    const bool scanout = pCreate->pPrimaryDesc && !noScanout;
-   const bool vidmm = scanout || ((pCreate->BindFlags & D3D10_DDI_BIND_PRESENT) &&
-                                  res->target == PIPE_TEXTURE_2D && res->array_size == 1 &&
-                                  res->last_level == 0 && res->nr_samples <= 1);
+   // A shared allocation must be openable outside the creating process.
+   // Give VidMM ownership of its pixels even when DXGI never presents it.
+   const bool shared = (pCreate->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) != 0;
+   const bool presentable = (pCreate->BindFlags & D3D10_DDI_BIND_PRESENT) != 0;
+   const bool singleSurface = res->target == PIPE_TEXTURE_2D && res->array_size == 1 &&
+                              res->last_level == 0 && res->nr_samples <= 1;
+   const bool vidmm = scanout || ((shared || presentable) && singleSurface);
    memset(&wh, 0, sizeof(wh));
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
    if (!screen->resource_get_handle(screen, pDevice->pipe, res, &wh,
