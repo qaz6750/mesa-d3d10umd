@@ -105,11 +105,15 @@ TopazScFixDestroy(void *device)
 static bool
 topaz_scfix_on(void)
 {
-   static int on = -1;
-   if (on < 0) {
-      const char *e = getenv("QCDX_SCFIX");
-      on = !(e && e[0] == '0');
-   }
+   static const bool on = [] {
+      const char *override = getenv("QCDX_SCFIX");
+      if (override)
+         return override[0] != '0';
+      /* A660 runs full fragment quads by default. Native scissor bounds
+       * preserve edge derivatives without copying the surrounding pixels. */
+      const char *full_quad = getenv("QCDX_FULLQUAD");
+      return full_quad && full_quad[0] == '0';
+   }();
    return on;
 }
 
@@ -146,7 +150,8 @@ topaz_strips_save(Device *d, const struct pipe_scissor_state *sc)
    int w = rt->width0, h = rt->height0;
    int x0 = sc->minx, y0 = sc->miny, x1 = sc->maxx, y1 = sc->maxy;   /* exclusive max, unaligned */
    int ax0 = x0 & ~1, ay0 = y0 & ~1, ax1 = MIN2((x1 + 1) & ~1, w), ay1 = MIN2((y1 + 1) & ~1, h);
-   if (x1 <= x0 || y1 <= y0 || x0 >= w || y0 >= h)
+   if (x1 <= x0 || y1 <= y0 || x0 >= w || y0 >= h ||
+       (ax0 == x0 && ay0 == y0 && ax1 <= x1 && ay1 <= y1))
       return;
    if (!S->stripTex || S->stripTex->width0 != rt->width0 || S->stripTex->height0 != rt->height0 ||
        S->stripTex->format != rt->format) {
@@ -431,8 +436,8 @@ SetScissorRects(D3D10DDI_HDEVICE hDevice,                            // IN
          g_topazFsSc[2] = 16384.0f - (float)states[0].maxx;
          g_topazFsSc[3] = 16384.0f - (float)states[0].maxy;
       }
-      /* qcdxkm: hardware scissor widened to whole 2x2 quads; the exact D3D scissor is applied in the PS
-       * (ShaderTGSI.c, demote) so the edge pixels' quad partners stay helper lanes. */
+      /* Only the legacy strip-copy and fragment-shader workarounds
+       * need to widen the hardware scissor to whole quads. */
       if (i == 0 && fixGpuScissor && !topaz_fs_scissor_on())
          topaz_strips_save(CastDevice(hDevice), &states[0]);
       if (topaz_fs_scissor_on() || fixGpuScissor) {

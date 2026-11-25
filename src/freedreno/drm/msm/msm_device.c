@@ -59,6 +59,9 @@ msm_device_new(int fd, drmVersionPtr version)
    if (!msm_dev)
       return NULL;
 
+#ifdef FD_WDDM
+   msm_dev->gem_retained = fd_wddm_gem_retained(fd);
+#endif
    dev = &msm_dev->base;
    dev->funcs = &funcs;
    dev->version = version->version_minor;

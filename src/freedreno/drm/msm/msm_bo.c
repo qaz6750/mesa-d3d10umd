@@ -81,6 +81,10 @@ msm_bo_cpu_prep(struct fd_bo *bo, struct fd_pipe *pipe, uint32_t op)
 static int
 msm_bo_madvise(struct fd_bo *bo, int willneed)
 {
+#ifdef FD_WDDM
+   if (to_msm_device(bo->dev)->gem_retained)
+      return 1;
+#endif
    struct drm_msm_gem_madvise req = {
       .handle = bo->handle,
       .madv = willneed ? MSM_MADV_WILLNEED : MSM_MADV_DONTNEED,

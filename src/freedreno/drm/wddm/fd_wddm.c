@@ -21,6 +21,7 @@
 struct fd_wddm_slot {
    fd_wddm_escape_fn escape;
    void *ctx;
+   uint32_t features;
    int refs;
    int handle;
    unsigned active;
@@ -40,7 +41,7 @@ static CONDITION_VARIABLE fds_drained = CONDITION_VARIABLE_INIT;
 /* In-flight escapes retain their slot index while a new D3D device can grow
  * the table. Access the array only under fds_lock. */
 static int
-allocate_slot(fd_wddm_escape_fn escape, void *ctx)
+allocate_slot(fd_wddm_escape_fn escape, void *ctx, uint32_t features)
 {
    if (next_fd == INT_MAX) {
       errno = EMFILE;
@@ -66,6 +67,7 @@ allocate_slot(fd_wddm_escape_fn escape, void *ctx)
    }
    fds[i].escape = escape;
    fds[i].ctx = ctx;
+   fds[i].features = features;
    fds[i].refs = 1;
    fds[i].handle = next_fd++;
    return fds[i].handle;
@@ -127,7 +129,7 @@ fd_wddm_open(fd_wddm_escape_fn escape, void *ctx)
       return -1;
    }
    AcquireSRWLockExclusive(&fds_lock);
-   ret = allocate_slot(escape, ctx);
+   ret = allocate_slot(escape, ctx, caps.features);
    ReleaseSRWLockExclusive(&fds_lock);
    return ret;
 }
@@ -149,7 +151,7 @@ fd_wddm_dup(int fd)
       }
    }
    if (original >= 0)
-      result = allocate_slot(fds[original].escape, fds[original].ctx);
+      result = allocate_slot(fds[original].escape, fds[original].ctx, fds[original].features);
    else
       errno = EBADF;
    ReleaseSRWLockExclusive(&fds_lock);
@@ -198,6 +200,16 @@ slot(int fd)
          return index;
    }
    return -1;
+}
+
+int
+fd_wddm_gem_retained(int fd)
+{
+   AcquireSRWLockShared(&fds_lock);
+   int index = slot(fd);
+   int retained = index >= 0 && (fds[index].features & QCDX_CAP_GEM_RETAINED);
+   ReleaseSRWLockShared(&fds_lock);
+   return retained;
 }
 
 int

@@ -52,6 +52,9 @@ msm_submit_bo_flags(const struct fd_bo *bo)
 
 struct msm_device {
    struct fd_device base;
+#ifdef FD_WDDM
+   bool gem_retained;
+#endif
 };
 FD_DEFINE_CAST(fd_device, msm_device);
 

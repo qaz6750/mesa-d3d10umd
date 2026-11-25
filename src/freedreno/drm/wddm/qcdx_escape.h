@@ -85,6 +85,8 @@ struct qcdx_region_command
 #define QCDX_CAP_VIDMM_COPY 0x80u
 #define QCDX_CAP_VIDMM_2D 0x100u
 #define QCDX_CAP_VIDMM_COPY_REGION 0x200u
+/* A live GEM handle retains its backing across cache DONTNEED/WILLNEED. */
+#define QCDX_CAP_GEM_RETAINED 0x400u
 
 struct qcdx_capabilities
 {
