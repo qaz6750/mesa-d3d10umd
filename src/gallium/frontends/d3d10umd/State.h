@@ -103,7 +103,6 @@ struct Device
    void *empty_vs;
 
    struct DepthStencilState *dss;   /* qcdxkm: current D3D depth-stencil state */
-   struct gdikmt_context *topazCtx; /* qcdxkm C2: WDDM context for pfnPresentCb */
    struct TopazScFix *topazScFix;   /* qcdxkm: per-device scissor strip state (Rasterizer.cpp) */
    bool topazRsScissor;             /* qcdxkm: bound rasterizer state has ScissorEnable */
 

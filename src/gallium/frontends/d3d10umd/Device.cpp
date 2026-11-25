@@ -77,8 +77,6 @@ ReleaseDeviceBackend(Device *device)
       device->pipe->destroy(device->pipe);
    if (device->screen)
       d3d10_destroy_screen(device->screen);
-   if (device->topazCtx)
-      device->topazCtx->destroy(device->topazCtx);
    fd_wddm_detach(&device->device.base);
    device->device.base.destroy(&device->device.base);
    mtx_destroy(&device->CreateResourceMtx);

@@ -87,6 +87,10 @@ void fd_pipe_fence_repopulate(struct pipe_fence_handle *fence,
                               struct pipe_fence_handle *last_fence);
 void fd_pipe_fence_ref(struct pipe_fence_handle **ptr,
                        struct pipe_fence_handle *pfence);
+#ifdef FD_WDDM
+bool fd_wddm_fence_submitted(struct pipe_screen *screen, struct pipe_context *pctx,
+                             struct pipe_fence_handle *fence);
+#endif
 bool fd_pipe_fence_finish(struct pipe_screen *pscreen, struct pipe_context *ctx,
                           struct pipe_fence_handle *pfence, uint64_t timeout);
 void fd_create_pipe_fence_fd(struct pipe_context *pctx,

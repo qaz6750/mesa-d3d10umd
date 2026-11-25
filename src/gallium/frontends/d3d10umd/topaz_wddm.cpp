@@ -280,6 +280,7 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    return S_OK;
 }
 
+extern "C" bool fd_wddm_fence_submitted(struct pipe_screen *, struct pipe_context *, struct pipe_fence_handle *);
 extern "C" void fd_bo_cache_debug_stats(unsigned *v);
 extern "C" void fd_bo_del_debug_stats(unsigned *v);
 extern "C" void fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last);
@@ -333,7 +334,7 @@ ReportPresentTiming(Device *pDevice)
    QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
                 " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
                 ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
-   QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, gpu wait %.2f, present cb %.2f, "
+   QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, submit wait %.2f, present cb %.2f, "
                 "map flushes/frame %.1f (%.2f ms/frame), draws/frame %.0f in %.2f ms\n",
                 timing.frameTicks * ms / 59, timing.flushTicks * ms / 60, timing.waitTicks * ms / 60,
                 timing.callbackTicks * ms / 60, timing.mapFlushes / 60.0, timing.mapFlushTicks * ms / 60,
@@ -343,7 +344,7 @@ ReportPresentTiming(Device *pDevice)
    timing.frequency = frequency;
 }
 
-/* DXGI Present: finish the GPU work on the source, then let the KMD blt/flip it */
+/* Queue the DXGI present behind the draws on their WDDM context. */
 HRESULT
 QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGIContext)
 {
@@ -357,9 +358,12 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    if (timing.frequency.QuadPart) QueryPerformanceCounter(&begin);
    pipe->flush(pipe, &fence, 0);
    if (timing.frequency.QuadPart) QueryPerformanceCounter(&flushed);
-   HRESULT wait = FinishFence(pDevice, fence);
-   if (FAILED(wait))
-      return wait;
+   if (!fence)
+      return E_FAIL;
+   bool submitted = fd_wddm_fence_submitted(pDevice->screen, pipe, fence);
+   pDevice->screen->fence_reference(pDevice->screen, &fence, NULL);
+   if (!submitted)
+      return E_FAIL;
    if (timing.frequency.QuadPart) {
       QueryPerformanceCounter(&completed);
       timing.flushTicks += flushed.QuadPart - begin.QuadPart;
@@ -368,11 +372,16 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
          timing.frameTicks += begin.QuadPart - timing.previous.QuadPart;
       timing.previous = begin;
    }
-   if (!pDevice->topazCtx) {
-      HRESULT hr = pDevice->device.base.createContext(&pDevice->device.base, &pDevice->topazCtx);
-      if (FAILED(hr))
-         return hr;
-   }
+   // A present without prior drawing may be the first user of this context.
+   auto &device = pDevice->device;
+   AcquireSRWLockExclusive(&device.qcdxSubmitLock);
+   HRESULT create = S_OK;
+   if (!device.qcdxSubmitContext)
+      create = device.base.createContext(&device.base, &device.qcdxSubmitContext);
+   auto *context = (struct gdikmt_context_d3dddi *)device.qcdxSubmitContext;
+   ReleaseSRWLockExclusive(&device.qcdxSubmitLock);
+   if (FAILED(create))
+      return create;
    /* not gdikmt's present(): it never passes a destination; a DXGI blt present with hDstResource
       (DWM to its primary) needs hDstAllocation */
    {
@@ -381,7 +390,7 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
       p.hSrcAllocation = pSrc->shared.handle;
       p.hDstAllocation = pDst ? pDst->shared.handle : 0;
       p.pDXGIContext = pDXGIContext;
-      p.hContext = ((struct gdikmt_context_d3dddi *)pDevice->topazCtx)->hContext;
+      p.hContext = context->hContext;
       LARGE_INTEGER callbackBegin, callbackEnd;
       if (timing.frequency.QuadPart) QueryPerformanceCounter(&callbackBegin);
       HRESULT hr = pDevice->device.pDXGIBaseCallbacks->pfnPresentCb(pDevice->device.hRTDevice, &p);

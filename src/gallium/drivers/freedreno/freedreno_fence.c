@@ -126,6 +126,27 @@ fd_pipe_fence_ref(struct pipe_fence_handle **ptr,
    *ptr = pfence;
 }
 
+#ifdef FD_WDDM
+/* Present on the submission context only needs the render callback to have
+ * queued this batch. The WDDM scheduler orders the flip after its DMA fence.
+ */
+bool
+fd_wddm_fence_submitted(struct pipe_screen *screen, struct pipe_context *pctx,
+                        struct pipe_fence_handle *fence)
+{
+   if (screen->fence_finish != fd_pipe_fence_finish)
+      return screen->fence_finish(screen, pctx, fence, OS_TIMEOUT_INFINITE);
+
+   do {
+      if (!fence_flush(pctx, fence, OS_TIMEOUT_INFINITE))
+         return false;
+      if (!fence->last_fence)
+         return fence->fence && fence->fence->kfence != 0;
+      fence = fence->last_fence;
+   } while (true);
+}
+#endif
+
 bool
 fd_pipe_fence_finish(struct pipe_screen *pscreen, struct pipe_context *pctx,
                      struct pipe_fence_handle *fence, uint64_t timeout)
