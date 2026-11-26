@@ -26,7 +26,7 @@ libd3d10umd = static_library(
     'D3DKMT.cpp',
     'gdikmt_d3dddi.cpp',
     'gdikmt_gpuva.cpp',
-    'topaz_wddm.cpp',
+    'qcdx_wddm.cpp',
   ),
   c_args : _c_args_d3d10umd,
   cpp_args : _c_args_d3d10umd,

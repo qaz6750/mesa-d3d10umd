@@ -3,7 +3,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-extern "C" void QcdxWddmLog(const char *text);   /* qcdxkm, topaz_wddm.cpp */
+extern "C" void QcdxWddmLog(const char *text);
 
 
 #if MESA_DEBUG

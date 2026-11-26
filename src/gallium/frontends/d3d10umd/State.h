@@ -167,7 +167,7 @@ extern "C" void TopazStripsRestore(void *device);
 extern "C" void TopazScFixDestroy(void *device);
 extern "C" void TopazStripsResave(void *device);
 extern "C" void TopazMaybeDump(void *pipe, void *presented);   /* Rasterizer.cpp */
-extern "C" void TopazLogDraw(const char *kind, unsigned count, void *device, void *rt, unsigned rtw, unsigned rth);   /* Rasterizer.cpp, QCDX_DRAWLOG=1 */   /* qcdxkm: topaz_wddm.cpp */
+extern "C" void TopazLogDraw(const char *kind, unsigned count, void *device, void *rt, unsigned rtw, unsigned rth);   /* Rasterizer.cpp, QCDX_DRAWLOG=1 */
 
 #define SetError(hDevice, hr) SetErrorAt(hDevice, hr, __func__, __LINE__)
 
@@ -450,7 +450,7 @@ CastPipeQuery(D3D10DDI_HQUERY hQuery)
 
 
 
-/* qcdxkm step C2 (topaz_wddm.cpp) */
+/* WDDM resource and presentation callbacks. */
 bool QcdxWddmWanted(const D3D10DDIARG_CREATERESOURCE *pCreate);
 void QcdxWddmTemplate(struct pipe_resource *templat);
 HRESULT QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG_CREATERESOURCE *pCreate, bool noScanout);

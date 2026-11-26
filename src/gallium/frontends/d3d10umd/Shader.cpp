@@ -34,7 +34,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "Shader.h"
-extern "C" bool topaz_log_tgsi;   /* qcdxkm: topaz_wddm.cpp */
+extern "C" bool topaz_log_tgsi;
 #include "ShaderParse.h"
 #include "State.h"
 #include "Query.h"

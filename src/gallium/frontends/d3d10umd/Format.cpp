@@ -39,10 +39,6 @@
 #include "Debug.h"
 
 
-/* XXX: for a time llvmpipe didn't support SRGB */
-#define HAVE_SRGB 1
-
-
 enum pipe_format
 FormatTranslate(DXGI_FORMAT Format, BOOL depth)
 {
@@ -134,33 +130,17 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
    case DXGI_FORMAT_BC1_UNORM:
       return PIPE_FORMAT_DXT1_RGBA;
    case DXGI_FORMAT_BC1_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_DXT1_SRGBA;
-#else
-      return PIPE_FORMAT_DXT1_RGBA;
-#endif
    case DXGI_FORMAT_BC2_UNORM:
       return PIPE_FORMAT_DXT3_RGBA;
    case DXGI_FORMAT_BC2_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_DXT3_SRGBA;
-#else
-      return PIPE_FORMAT_DXT3_RGBA;
-#endif
    case DXGI_FORMAT_BC3_UNORM:
       return PIPE_FORMAT_DXT5_RGBA;
    case DXGI_FORMAT_BC3_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_DXT5_SRGBA;
-#else
-      return PIPE_FORMAT_DXT5_RGBA;
-#endif
    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_R8G8B8A8_SRGB;
-#else
-      return PIPE_FORMAT_R8G8B8A8_UNORM;
-#endif
 
    /* Gallium has no typeless formats.  We simply use an equivalent
     * typed format.
@@ -251,19 +231,11 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
       return PIPE_FORMAT_B8G8R8A8_UNORM;
    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_B8G8R8A8_SRGB;
-#else
-      return PIPE_FORMAT_B8G8R8A8_UNORM;
-#endif
    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
       return PIPE_FORMAT_B8G8R8X8_UNORM;
    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
-#if HAVE_SRGB
       return PIPE_FORMAT_B8G8R8X8_SRGB;
-#else
-      return PIPE_FORMAT_B8G8R8X8_UNORM;
-#endif
 
    case DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM:
       return PIPE_FORMAT_R10G10B10A2_UNORM;

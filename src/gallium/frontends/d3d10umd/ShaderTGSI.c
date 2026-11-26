@@ -2352,7 +2352,7 @@ Shader_tgsi_translate(const unsigned *code,
    ureg_destroy(ureg);
 
    {
-      extern bool topaz_log_tgsi;   /* qcdxkm: topaz_wddm.cpp */
+      extern bool topaz_log_tgsi;
       if (topaz_log_tgsi) {
          fprintf(stderr, "---- TGSI (%u tokens)\n", nr_tokens);
          tgsi_dump_to_file(tokens, 0, stderr);
