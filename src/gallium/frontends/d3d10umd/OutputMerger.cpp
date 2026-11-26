@@ -200,11 +200,12 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
 {
    LOG_ENTRYPOINT();
 
-   struct pipe_context *pipe = CastPipeContext(hDevice);
+   Device *device = CastDevice(hDevice);
+   struct pipe_context *pipe = device->pipe;
    struct pipe_surface *surface = GetPipeRenderTargetView(hRenderTargetView);
    union pipe_color_union clear_color;
 
-   TopazStripsRestore(CastDevice(hDevice));
+   TopazStripsRestore(device);
    TopazLogDraw("ClearRTV", 0, NULL, (void *)surface->texture, surface->width, surface->height);
 
    /*
@@ -256,6 +257,16 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
       clear_color.f[1] = pColorRGBA[1];
       clear_color.f[2] = pColorRGBA[2];
       clear_color.f[3] = pColorRGBA[3];
+   }
+
+   /* A full clear of the bound 2D target can stay in the current render
+    * pass. Freedreno can record it as a fast clear for sysmem or GMEM.
+    */
+   if (device->fb.nr_cbufs == 1 && device->fb.cbufs[0] == surface &&
+       device->fb.width == surface->width && device->fb.height == surface->height &&
+       surface->texture->target == PIPE_TEXTURE_2D && surface->texture->nr_samples <= 1) {
+      pipe->clear(pipe, PIPE_CLEAR_COLOR0, NULL, &clear_color, 0.0, 0);
+      return;
    }
 
    pipe->clear_render_target(pipe,
