@@ -52,6 +52,13 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
    DBG("%p: %p: flush: flags=%x, fencep=%p", ctx, batch, flags, fencep);
 
    if (fencep && !batch) {
+      /* Attaching a new batch fence marks the batch dirty and drops
+       * last_fence. Satisfy an idle fence request before creating it.
+       */
+      if (!flags && ctx->last_fence && ctx->in_fence_fd == -1) {
+         fd_pipe_fence_ref(&fence, ctx->last_fence);
+         goto out;
+      }
       batch = fd_context_batch(ctx);
    } else if (!batch) {
       return;
