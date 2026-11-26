@@ -130,6 +130,14 @@ struct qcdx_adapter_info {
     unsigned long long minimum_address;
 };
 
+/* Extended UMDRIVERPRIVATE reply. The original 4- and 16-byte queries
+   retain their layout. The LUID identifies this adapter to the Vulkan ICD. */
+struct qcdx_adapter_info_luid {
+    struct qcdx_adapter_info base;
+    unsigned luid_low;
+    int luid_high;
+};
+
 struct qcdx_bo_layout {
     unsigned handle, bytes, read_only, reserved;
 };
