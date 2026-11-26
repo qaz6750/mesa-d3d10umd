@@ -320,6 +320,7 @@ QcdxWddmFinishResource(Device *device, Resource *resource)
       return E_INVALIDARG;
    struct pipe_context *pipe = device->pipe;
    struct pipe_fence_handle *fence = NULL;
+   QcdxCountFlush(&device->device, QCDX_FLUSH_RESOURCE_SYNC);
    if (pipe->flush_resource)
       pipe->flush_resource(pipe, resource->resource);
    pipe->flush(pipe, &fence, 0);
@@ -373,6 +374,7 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    PresentTiming &timing = pDevice->timing;
    LARGE_INTEGER begin, flushed, completed;
    if (timing.frequency.QuadPart) QueryPerformanceCounter(&begin);
+   QcdxCountFlush(&pDevice->device, QCDX_FLUSH_PRESENT);
    pipe->flush(pipe, &fence, 0);
    if (timing.frequency.QuadPart) QueryPerformanceCounter(&flushed);
    if (!fence)
@@ -392,8 +394,8 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    // A present without prior drawing may be the first user of this context.
    auto &device = pDevice->device;
    AcquireSRWLockExclusive(&device.qcdxSubmitLock);
-   HRESULT create = S_OK;
-   if (!device.qcdxSubmitContext)
+   HRESULT create = device.gpuVa ? QcdxGpuVaDrain(&device) : S_OK;
+   if (SUCCEEDED(create) && !device.qcdxSubmitContext)
       create = device.base.createContext(&device.base, &device.qcdxSubmitContext);
    auto *context = (struct gdikmt_context_d3dddi *)device.qcdxSubmitContext;
    ReleaseSRWLockExclusive(&device.qcdxSubmitLock);

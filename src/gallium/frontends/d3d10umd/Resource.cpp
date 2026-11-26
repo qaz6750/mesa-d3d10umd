@@ -211,6 +211,7 @@ static HRESULT
 LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
 {
    struct pipe_fence_handle *fence = NULL;
+   QcdxCountFlush(&device->device, QCDX_FLUSH_MAP_UPDATE);
    device->pipe->flush(device->pipe, &fence, 0);
    if (!fence) return E_FAIL;
    // Lock2 does not synchronize access. Wait for completion of this
@@ -674,8 +675,9 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
 {
    LOG_ENTRYPOINT();
 
-   PresentTiming &timing = CastDevice(hDevice)->timing;
-   struct pipe_context *pipe = CastPipeContext(hDevice);
+   Device *device = CastDevice(hDevice);
+   PresentTiming &timing = device->timing;
+   struct pipe_context *pipe = device->pipe;
    Resource *pResource = CastResource(hResource);
    struct pipe_resource *resource = pResource->resource;
 
@@ -707,6 +709,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       /* qcdxkm experiment QCDX_CBFLUSH=1: flush before DISCARD maps of constant buffers (are CB reads of
        * pending draws not tracked by freedreno, so DISCARD writes in place?) */
       if ((resource->bind & PIPE_BIND_CONSTANT_BUFFER) && getenv("QCDX_CBFLUSH") && getenv("QCDX_CBFLUSH")[0] == '1') {
+         QcdxCountFlush(&device->device, QCDX_FLUSH_MAP_UPDATE);
          pipe->flush(pipe, NULL, 0);
          if (timing.frequency.QuadPart) ++timing.mapFlushes;
       }
@@ -734,6 +737,7 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
          {
             LARGE_INTEGER start, end;
             if (timing.frequency.QuadPart) QueryPerformanceCounter(&start);
+            QcdxCountFlush(&device->device, QCDX_FLUSH_MAP_UPDATE);
             pipe->flush(pipe, NULL, 0);
             if (timing.frequency.QuadPart) {
                QueryPerformanceCounter(&end);
@@ -1186,6 +1190,7 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    char m = uf ? uf[0] : (wholeConstants ? '0' : '1');
    if ((m == '1' && constants) ||
        (m == '2' && pDstResource->buffer) || m == '3') {
+      QcdxCountFlush(&pDevice->device, QCDX_FLUSH_MAP_UPDATE);
       pipe->flush(pipe, NULL, 0);
       if (pDevice->timing.frequency.QuadPart) ++pDevice->timing.mapFlushes;
    }

@@ -175,6 +175,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->device.gpuVa = model == S_OK && adapterInfo.magic == QCDX_ESC_MAGIC &&
       (adapterInfo.features & QCDX_CAP_VIDMM_GPUVA);
    pDevice->device.directGpuVa = pDevice->device.gpuVa && (adapterInfo.features & QCDX_CAP_DIRECT_GPUVA);
+   pDevice->device.privateSubmit = pDevice->device.gpuVa && (adapterInfo.features & QCDX_CAP_PRIVATE_SUBMIT);
    pDevice->device.minimumGpuAddress = adapterInfo.minimum_address;
    const size_t callbackBytes = pDevice->device.gpuVa ?
       offsetof(D3DDDI_DEVICECALLBACKS, pfnDeallocate2Cb) + sizeof(pCreateData->pKTCallbacks->pfnDeallocate2Cb) :
@@ -500,6 +501,7 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
    LOG_ENTRYPOINT();
 
    Device *device = CastDevice(hDevice);
+   QcdxCountFlush(&device->device, QCDX_FLUSH_RUNTIME);
    device->pipe->flush(device->pipe, NULL, 0);
    HRESULT loss = ReadAcquire(&device->device.deviceLoss);
    if (FAILED(loss)) SetError(hDevice, loss);

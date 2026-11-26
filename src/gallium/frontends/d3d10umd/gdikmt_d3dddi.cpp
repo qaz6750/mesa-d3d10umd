@@ -101,7 +101,9 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
    const bool getAddress = device->gpuVa && valid && request->nr == DRM_COMMAND_BASE + DRM_MSM_GEM_INFO &&
       request->size == sizeof(*info) && info->info == MSM_INFO_GET_IOVA;
    const bool close = device->gpuVa && valid && request->nr == QCDX_NR_GEM_CLOSE && request->size == sizeof(drm_gem_close);
-   if (submit || close || getAddress)
+   const bool exportBo = device->privateSubmit && valid && request->nr == QCDX_NR_GEM_FLINK;
+   const bool closeQueue = device->privateSubmit && valid && request->nr == DRM_COMMAND_BASE + DRM_MSM_SUBMITQUEUE_CLOSE;
+   if (submit || close || getAddress || exportBo || closeQueue)
       AcquireSRWLockExclusive(&device->qcdxSubmitLock);
    D3DDDICB_ESCAPE escape;
    memset(&escape, 0, sizeof(escape));
@@ -128,7 +130,31 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
          return loss;
       }
    }
+   if (close || exportBo || closeQueue) {
+      HRESULT hr = QcdxGpuVaDrain(device);
+      // Once lost, GEM and queue closes still release kernel references.
+      if (FAILED(hr) && exportBo) {
+         request->ret = -19;
+         ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+         return hr;
+      }
+   }
+   const bool capture = submit && device->privateSubmit;
+   qcdx_capture_info profile = {};
+   if (capture) {
+      static_assert(sizeof(drm_msm_gem_submit) + sizeof(profile) <= sizeof(request->data), "capture payload");
+      for (unsigned i = 0; i < QCDX_FLUSH_COUNT; ++i)
+         profile.flushes[i] = InterlockedExchange(&device->flushes[i], 0);
+      memcpy(request->data + sizeof(drm_msm_gem_submit), &profile, sizeof(profile));
+      request->nr = QCDX_NR_CAPTURE_GPUVA;
+      request->size += sizeof(profile);
+   }
    NTSTATUS status = device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
+   if (capture) {
+      memcpy(&profile, request->data + sizeof(drm_msm_gem_submit), sizeof(profile));
+      request->nr = DRM_COMMAND_BASE + DRM_MSM_GEM_SUBMIT;
+      request->size = sizeof(drm_msm_gem_submit);
+   }
    if (close && status == STATUS_SUCCESS && !request->ret)
       QcdxGpuVaClose(device, reinterpret_cast<drm_gem_close *>(request->data)->handle);
    if (submit && status == STATUS_SUCCESS && request->ret == 0) {
@@ -139,7 +165,7 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
       if (!device->gpuVa && !device->qcdxSubmitContext)
          status = device->base.createContext(&device->base, &device->qcdxSubmitContext);
       if (device->gpuVa)
-         status = QcdxGpuVaSubmit(device, batch);
+         status = QcdxGpuVaSubmit(device, batch, capture && profile.private_bos);
       else if (status == STATUS_SUCCESS) {
          struct gdikmt_context *context = device->qcdxSubmitContext;
          if (!context || !context->pCommandBuffer || context->CommandBufferSize < sizeof(command)) {
@@ -170,7 +196,7 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
       if (status == STATUS_SUCCESS && request->ret == -19) status = DXGI_ERROR_DEVICE_REMOVED;
       status = QcdxGpuVaDeviceStatus(device, status);
    }
-   if (submit || close)
+   if (submit || close || exportBo || closeQueue)
       ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
    return status;
 }

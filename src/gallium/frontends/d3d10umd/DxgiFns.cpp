@@ -249,6 +249,7 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
 
    // Views stay bound to their pipe_resource. The VidMM handle must follow
    // the underlying BO through the entire flip chain.
+   QcdxCountFlush(&device->device, QCDX_FLUSH_ROTATE);
    device->pipe->flush(device->pipe, NULL, 0);
    fd_resource_rotate_storage(device->pipe, storage, count);
    if (storage != stack)

@@ -219,7 +219,7 @@ struct VirtualPacket {
       VirtualBuffer *replaced; /* Restore this BO's private mapping after its fence. */
    } mappings[QCDX_MAX_SUBMIT_BOS];
    bool commandBuffers[QCDX_MAX_SUBMIT_BOS];
-   UINT residentCount;
+   UINT residentCount, queueId;
    UINT64 pagingFence;
    D3DKMT_HANDLE allocations[2 * QCDX_MAX_SUBMIT_BOS];
 };
@@ -275,10 +275,37 @@ RetainPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
    return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
 }
 
-HRESULT
-QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
+static HRESULT
+WaitPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
 {
-   HRESULT loss = ReadAcquire(&device->deviceLoss);
+   drm_msm_wait_fence wait = {};
+   wait.fence = packet->ticket.fence;
+   wait.queueid = packet->queueId;
+   HRESULT hr;
+   do {
+      hr = GemEscape(device, DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, wait);
+   } while (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+   return hr;
+}
+
+/* Called under qcdxSubmitLock. Only private submissions can be deferred.
+ * On an uncertain completion leave the packet pinned until context teardown. */
+HRESULT
+QcdxGpuVaDrain(gdikmt_device_d3dddi *device)
+{
+   HRESULT hr = ReadAcquire(&device->deviceLoss);
+   auto *packet = device->unretiredPacket;
+   if (!packet || FAILED(hr)) return hr;
+   if (FAILED(WaitPacket(device, packet))) return RetainPacket(device, packet);
+   device->unretiredPacket = nullptr;
+   hr = ReleasePacket(device, packet);
+   return FAILED(hr) ? QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED) : S_OK;
+}
+
+HRESULT
+QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, bool privateBos)
+{
+   HRESULT loss = QcdxGpuVaDrain(device);
    if (FAILED(loss)) return loss;
    if (!batch->nr_bos || batch->nr_bos > QCDX_MAX_SUBMIT_BOS || !batch->nr_cmds)
       return E_INVALIDARG;
@@ -295,6 +322,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
    }
    HRESULT hr = S_OK;
    UINT allocations = 0, mapped = 0;
+   packet->queueId = batch->queueid;
    D3DDDICB_SUBMITCOMMAND submit = {};
    packet->ticket = {QCDX_ESC_MAGIC, QCDX_RENDER_SUBMIT_GPUVA, batch->fence, {0}};
    for (UINT i = 0; SUCCEEDED(hr) && i < batch->nr_bos; ++i) {
@@ -306,7 +334,9 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
          submit.CommandLength = cmds[first].size;
       }
       list_for_each_entry(qcdx_shared_allocation, shared, &device->sharedAllocations, link) {
-         if (shared->boName != buffer->name || !shared->vidmmPitch) continue;
+         if (shared->boName != buffer->name) continue;
+         privateBos = false;
+         if (!shared->vidmmPitch) continue;
          if (packet->commandBuffers[i] || !shared->bytes) { hr = E_INVALIDARG; break; }
          auto &operand = packet->surfaces[mapped];
          uint64_t address = 0;
@@ -345,12 +375,11 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
       submit.PrivateDriverDataSize = sizeof(packet->ticket) + mapped * sizeof(packet->surfaces[0]);
       hr = device->KTCallbacks.pfnSubmitCommandCb(device->hRTDevice, &submit);
       if (SUCCEEDED(hr)) {
-         drm_msm_wait_fence wait = {};
-         wait.fence = batch->fence;
-         wait.queueid = batch->queueid;
-         do {
-            hr = GemEscape(device, DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, wait);
-         } while (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+         if (privateBos) {
+            device->unretiredPacket = packet;
+            return S_OK;
+         }
+         hr = WaitPacket(device, packet);
          if (FAILED(hr)) return RetainPacket(device, packet);
       }
    }
@@ -380,6 +409,7 @@ QcdxGpuVaClose(gdikmt_device_d3dddi *device, unsigned name)
 void
 QcdxGpuVaStop(gdikmt_device_d3dddi *device)
 {
+   QcdxGpuVaDrain(device);
    HRESULT stopped = S_OK;
    if (device->virtualContext) {
       D3DDDICB_DESTROYCONTEXT destroy = {device->virtualContext};

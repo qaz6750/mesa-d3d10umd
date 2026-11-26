@@ -22,6 +22,7 @@
 #define QCDX_NR_CANCEL_SUBMIT 0x1004
 #define QCDX_NR_DISPLAY_TRACE 0x1005
 #define QCDX_NR_BO_LAYOUT 0x1006
+#define QCDX_NR_CAPTURE_GPUVA 0x1007
 #define QCDX_RENDER_SUBMIT 1u
 /* Full linear copy. The allocation list contains the source, then a writable
    destination. VidMM supplies the device-specific handles and residency. */
@@ -97,7 +98,20 @@ struct qcdx_region_command
 /* A live GEM handle retains its backing across cache DONTNEED/WILLNEED. */
 #define QCDX_CAP_GEM_RETAINED 0x400u
 #define QCDX_CAP_VIDMM_GPUVA 0x800u
-enum { QCDX_CAP_DIRECT_GPUVA = 0x1000u };
+enum { QCDX_CAP_DIRECT_GPUVA = 0x1000u, QCDX_CAP_PRIVATE_SUBMIT = 0x2000u };
+
+/* CAPTURE_GPUVA extends drm_msm_gem_submit with this trailer. Flush counts
+   are DDI calls since the previous capture on this device. private_bos is
+   set by the KMD only after inspecting every captured binding. */
+enum qcdx_flush_reason {
+    QCDX_FLUSH_PRESENT, QCDX_FLUSH_RESOURCE_SYNC, QCDX_FLUSH_MAP_UPDATE,
+    QCDX_FLUSH_RUNTIME, QCDX_FLUSH_ROTATE, QCDX_FLUSH_COUNT
+};
+
+struct qcdx_capture_info {
+    unsigned flushes[QCDX_FLUSH_COUNT];
+    unsigned private_bos;
+};
 
 struct qcdx_capabilities
 {

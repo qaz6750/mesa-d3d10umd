@@ -31,7 +31,8 @@ struct gdikmt_device_d3dddi {
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
    list_head sharedAllocations;
-   bool gpuVa, directGpuVa;
+   bool gpuVa, directGpuVa, privateSubmit;
+   volatile LONG flushes[QCDX_FLUSH_COUNT];
    volatile LONG deviceLoss; /* First GPUVA device-loss HRESULT from the submit worker. */
    uint64_t minimumGpuAddress;
    list_head virtualBuffers[64];
@@ -49,10 +50,17 @@ struct gdikmt_context_d3dddi {
     HANDLE hContext;
 };
 
+static inline void
+QcdxCountFlush(gdikmt_device_d3dddi *device, qcdx_flush_reason reason)
+{
+   if (device->privateSubmit) InterlockedIncrement(&device->flushes[reason]);
+}
+
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
 HRESULT QcdxGpuVaDeviceStatus(gdikmt_device_d3dddi *device, HRESULT result);
 HRESULT QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address);
-HRESULT QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const struct drm_msm_gem_submit *batch);
+HRESULT QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const struct drm_msm_gem_submit *batch, bool privateBos);
+HRESULT QcdxGpuVaDrain(gdikmt_device_d3dddi *device);
 void QcdxGpuVaClose(gdikmt_device_d3dddi *device, unsigned name);
 void QcdxGpuVaStop(gdikmt_device_d3dddi *device);
 void QcdxTraceDisplay(gdikmt_device_d3dddi *device, qcdx_display_event event,
