@@ -83,6 +83,7 @@ TrackSharedAllocation(Device *device, Resource *resource, D3DKMT_HANDLE handle, 
    resource->shared.boName = boName;
    AcquireSRWLockExclusive(&device->device.qcdxSubmitLock);
    list_addtail(&resource->shared.link, &device->device.sharedAllocations);
+   QcdxGpuVaInvalidateShared(&device->device, boName);
    ReleaseSRWLockExclusive(&device->device.qcdxSubmitLock);
 }
 
@@ -211,6 +212,7 @@ QcdxWddmDestroyAllocation(Device *pDevice, Resource *pResource)
 {
    if (pResource->shared.link.next) {
       AcquireSRWLockExclusive(&pDevice->device.qcdxSubmitLock);
+      QcdxGpuVaInvalidateShared(&pDevice->device, pResource->shared.boName);
       list_del(&pResource->shared.link);
       ReleaseSRWLockExclusive(&pDevice->device.qcdxSubmitLock);
    }

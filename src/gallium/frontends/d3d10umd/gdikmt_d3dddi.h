@@ -58,6 +58,7 @@ QcdxCountFlush(gdikmt_device_d3dddi *device, qcdx_flush_reason reason)
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
 HRESULT QcdxGpuVaDeviceStatus(gdikmt_device_d3dddi *device, HRESULT result);
+void QcdxGpuVaInvalidateShared(gdikmt_device_d3dddi *device, unsigned name);
 HRESULT QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address);
 HRESULT QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const struct drm_msm_gem_submit *batch, bool privateBos);
 HRESULT QcdxGpuVaDrain(gdikmt_device_d3dddi *device);

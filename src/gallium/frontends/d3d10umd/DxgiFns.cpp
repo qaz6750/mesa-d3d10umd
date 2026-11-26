@@ -258,6 +258,7 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
    const auto firstStorage = first->shared;
    for (UINT i = 0; i < count; ++i) {
       auto &slot = CastResource(args->pResources[i])->shared;
+      QcdxGpuVaInvalidateShared(&device->device, slot.boName);
       const list_head link = slot.link;
       slot = i + 1 < count ? CastResource(args->pResources[i + 1])->shared : firstStorage;
       slot.link = link;

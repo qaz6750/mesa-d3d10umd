@@ -8,7 +8,8 @@
 struct VirtualBuffer {
    list_head link;
    unsigned name, bytes;
-   bool readOnly;
+   bool readOnly, sharedResolved;
+   const qcdx_shared_allocation *shared;
    D3DKMT_HANDLE allocation;
    uint64_t address, cpu;
 };
@@ -150,6 +151,30 @@ FindBuffer(gdikmt_device_d3dddi *device, unsigned name)
    list_for_each_entry(VirtualBuffer, item, &device->virtualBuffers[name % ARRAY_SIZE(device->virtualBuffers)], link)
       if (item->name == name) return item;
    return nullptr;
+}
+
+// The submit lock protects the cached slot, including a negative lookup.
+void
+QcdxGpuVaInvalidateShared(gdikmt_device_d3dddi *device, unsigned name)
+{
+   if (auto *buffer = FindBuffer(device, name)) {
+      buffer->sharedResolved = false;
+      buffer->shared = nullptr;
+   }
+}
+
+static const qcdx_shared_allocation *
+FindSharedAllocation(gdikmt_device_d3dddi *device, VirtualBuffer *buffer)
+{
+   if (!buffer->sharedResolved) {
+      list_for_each_entry(qcdx_shared_allocation, shared, &device->sharedAllocations, link) {
+         if (shared->boName != buffer->name) continue;
+         buffer->shared = shared;
+         if (shared->vidmmPitch) break;
+      }
+      buffer->sharedResolved = true;
+   }
+   return buffer->shared;
 }
 
 HRESULT
@@ -346,8 +371,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          submit.Commands = buffer->address + cmds[first].submit_offset;
          submit.CommandLength = cmds[first].size;
       }
-      list_for_each_entry(qcdx_shared_allocation, shared, &device->sharedAllocations, link) {
-         if (shared->boName != buffer->name) continue;
+      if (const auto *shared = FindSharedAllocation(device, buffer)) {
          privateBos = false;
          if (!shared->vidmmPitch) continue;
          if (commandBuffers[i] || !shared->bytes) { hr = E_INVALIDARG; break; }
@@ -364,7 +388,6 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          // Only the canonical allocation backs a direct operand during DMA.
          if (mapping.replaced) packet->allocations[allocations - 1] = shared->handle;
          else packet->allocations[allocations++] = shared->handle;
-         break;
       }
    }
    packet->ticket.reserved = mapped;
