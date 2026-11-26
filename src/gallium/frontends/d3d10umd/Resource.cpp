@@ -40,6 +40,7 @@ extern "C" void fd_resource_debug_state(struct pipe_resource *prsc, void **bo, u
 #include "Debug.h"
 
 #include "pipe/p_defines.h"
+#include "util/os_time.h"
 #include "util/u_math.h"
 #include "util/u_rect.h"
 #include "util/u_surface.h"
@@ -194,20 +195,15 @@ subResourceBox(struct pipe_resource *resource, // IN
 static HRESULT
 LockVidmmAllocation(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait, void **data)
 {
-   if (resource->vidmmLocked || !device->device.KTCallbacks.pfnLockCb ||
-       !device->device.KTCallbacks.pfnUnlockCb)
+   auto &runtime = device->device;
+   if (resource->vidmmLocked || (runtime.gpuVa ? !runtime.KTCallbacks.pfnUnlock2Cb : !runtime.KTCallbacks.pfnUnlockCb))
       return E_INVALIDARG;
-   D3DDDICB_LOCK lock = {};
-   lock.hAllocation = resource->shared.handle;
-   lock.Flags.LockEntire = TRUE;
-   lock.Flags.ReadOnly = mode == D3D10_DDI_MAP_READ;
-   lock.Flags.WriteOnly = mode != D3D10_DDI_MAP_READ && mode != D3D10_DDI_MAP_READWRITE;
-   lock.Flags.DonotWait = doNotWait;
-   HRESULT hr = device->device.KTCallbacks.pfnLockCb(device->device.hRTDevice, &lock);
-   if (SUCCEEDED(hr)) {
-      resource->vidmmLocked = true;
-      *data = lock.pData;
-   }
+   D3DDDICB_LOCKFLAGS flags = {};
+   flags.ReadOnly = mode == D3D10_DDI_MAP_READ;
+   flags.WriteOnly = mode != D3D10_DDI_MAP_READ && mode != D3D10_DDI_MAP_READWRITE;
+   flags.DonotWait = doNotWait;
+   HRESULT hr = runtime.base.lockAllocation(&runtime.base, resource->shared.handle, flags, data);
+   if (SUCCEEDED(hr)) resource->vidmmLocked = true;
    return hr;
 }
 
@@ -217,10 +213,13 @@ LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait
    struct pipe_fence_handle *fence = NULL;
    device->pipe->flush(device->pipe, &fence, 0);
    if (!fence) return E_FAIL;
-   // The allocation list on RenderCb carries the read/write hazard to LockCb.
-   // Keep the zero-timeout poll for callers that cannot wait for submission.
-   bool ready = doNotWait ? device->screen->fence_finish(device->screen, device->pipe, fence, 0)
-                          : fd_wddm_fence_submitted(device->screen, device->pipe, fence);
+   // Lock2 does not synchronize access. Wait for completion of this
+   // device's GPUVA work before handing the CPU the surface.
+   bool ready;
+   if (doNotWait || device->device.gpuVa)
+      ready = device->screen->fence_finish(device->screen, device->pipe, fence, doNotWait ? 0 : OS_TIMEOUT_INFINITE);
+   else
+      ready = fd_wddm_fence_submitted(device->screen, device->pipe, fence);
    device->screen->fence_reference(device->screen, &fence, NULL);
    if (!ready) return doNotWait ? DXGI_ERROR_WAS_STILL_DRAWING : E_FAIL;
    return LockVidmmAllocation(device, resource, mode, doNotWait, data);
@@ -229,10 +228,17 @@ LockVidmm(Device *device, Resource *resource, D3D10_DDI_MAP mode, bool doNotWait
 static HRESULT
 UnlockVidmm(Device *device, Resource *resource)
 {
-   D3DDDICB_UNLOCK unlock = {};
-   unlock.NumAllocations = 1;
-   unlock.phAllocations = &resource->shared.handle;
-   HRESULT hr = device->device.KTCallbacks.pfnUnlockCb(device->device.hRTDevice, &unlock);
+   auto &runtime = device->device;
+   HRESULT hr;
+   if (runtime.gpuVa) {
+      D3DDDICB_UNLOCK2 unlock = {resource->shared.handle};
+      hr = runtime.KTCallbacks.pfnUnlock2Cb(runtime.hRTDevice, &unlock);
+   } else {
+      D3DDDICB_UNLOCK unlock = {};
+      unlock.NumAllocations = 1;
+      unlock.phAllocations = &resource->shared.handle;
+      hr = runtime.KTCallbacks.pfnUnlockCb(runtime.hRTDevice, &unlock);
+   }
    if (SUCCEEDED(hr)) resource->vidmmLocked = false;
    return hr;
 }

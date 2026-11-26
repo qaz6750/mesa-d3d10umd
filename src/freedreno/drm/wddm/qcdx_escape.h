@@ -21,6 +21,7 @@
 #define QCDX_NR_CAPABILITIES 0x1003 /* struct qcdx_capabilities */
 #define QCDX_NR_CANCEL_SUBMIT 0x1004
 #define QCDX_NR_DISPLAY_TRACE 0x1005
+#define QCDX_NR_BO_LAYOUT 0x1006
 #define QCDX_RENDER_SUBMIT 1u
 /* Full linear copy. The allocation list contains the source, then a writable
    destination. VidMM supplies the device-specific handles and residency. */
@@ -29,12 +30,20 @@
 #define QCDX_RENDER_FILL_SURFACE 3u
 #define QCDX_RENDER_COPY_REGION 4u
 #define QCDX_RENDER_SUBMIT_VIDMM 5u
+#define QCDX_RENDER_SUBMIT_GPUVA 6u
 
 /* Submitted after a render ticket for a linear VidMM-owned surface. The
    runtime supplies the allocation handle and access rights separately. */
 #define QCDX_MAX_SUBMIT_BOS 1024u
 struct qcdx_vidmm_operand {
     unsigned allocation_index, buffer_index, pitch, offset;
+};
+
+/* SubmitCommand private data follows the ticket with these virtual surface
+   operands. The kernel resolves each address through the submitting context. */
+struct qcdx_gpuva_operand {
+    unsigned long long address;
+    unsigned buffer_index, pitch, offset, reserved;
 };
 
 enum qcdx_display_event {
@@ -87,6 +96,7 @@ struct qcdx_region_command
 #define QCDX_CAP_VIDMM_COPY_REGION 0x200u
 /* A live GEM handle retains its backing across cache DONTNEED/WILLNEED. */
 #define QCDX_CAP_GEM_RETAINED 0x400u
+#define QCDX_CAP_VIDMM_GPUVA 0x800u
 
 struct qcdx_capabilities
 {
@@ -98,6 +108,15 @@ struct qcdx_capabilities
     unsigned gmem_size;
     unsigned features;
     unsigned reserved[5];
+};
+
+struct qcdx_adapter_info {
+    unsigned magic, features;
+    unsigned long long minimum_address;
+};
+
+struct qcdx_bo_layout {
+    unsigned handle, bytes, read_only, reserved;
 };
 
 struct qcdx_version
@@ -135,6 +154,7 @@ struct qcdx_escape
 #define QCDX_ALLOC_F_SRGB 0x2
 /* Dedicated linear VidMM allocation covering the entire texture BO. */
 #define QCDX_ALLOC_F_DIRECT 0x4
+#define QCDX_ALLOC_F_GPUVA_BACKING 0x8
 
 struct qcdx_alloc
 {

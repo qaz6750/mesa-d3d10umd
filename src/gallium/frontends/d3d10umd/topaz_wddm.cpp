@@ -191,6 +191,7 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
       return static_cast<HRESULT>(st);
    }
    pResource->shared.systemMemoryMapping = memory.addr;
+   pResource->shared.bytes = a.size;
    if (vidmm) {
       pResource->shared.vidmmPitch = a.pitch;
       pResource->shared.gpuPitch = wh.stride;
@@ -246,6 +247,7 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    a = (const struct qcdx_alloc *)info.pPrivateDriverData;
    if (a->magic != QCDX_ALLOC_MAGIC || a->kind > QCDX_ALLOC_GDI)
       return E_INVALIDARG;
+   resource->shared.bytes = a->size;
    enum pipe_format format = TopazPipeFormat(a->format);
    if (format != PIPE_FORMAT_NONE && (a->flags & QCDX_ALLOC_F_SRGB))
       format = util_format_srgb(format);
@@ -266,7 +268,9 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    templat.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR | PIPE_BIND_SHARED;
    memset(&wh, 0, sizeof(wh));
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
-   if (!a->bo) {
+   // Under GPUVA each import gets a private BO. The batch mirrors the live
+   // allocation view, including its offset and read-only grant.
+   if (!a->bo || pDevice->device.gpuVa) {
       if (a->pitch & 31) return DXGI_DDI_ERR_UNSUPPORTED;
       resource->resource = pDevice->screen->resource_create(pDevice->screen, &templat);
       if (!resource->resource) return E_OUTOFMEMORY;

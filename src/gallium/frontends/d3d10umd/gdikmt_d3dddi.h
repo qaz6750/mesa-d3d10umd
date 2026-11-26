@@ -7,6 +7,7 @@ struct qcdx_shared_allocation {
    list_head link;
    D3DKMT_HANDLE handle;
    unsigned boName;
+   unsigned bytes;
    unsigned vidmmPitch; /* Nonzero for canonical VidMM storage. */
    unsigned gpuPitch, gpuOffset;
    uint64_t systemMemoryMapping; /* Creator mapping passed to AllocateCb. */
@@ -29,6 +30,11 @@ struct gdikmt_device_d3dddi {
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
    list_head sharedAllocations;
+   bool gpuVa;
+   uint64_t minimumGpuAddress;
+   list_head virtualBuffers;
+   D3DDDICB_CREATEPAGINGQUEUE paging;
+   HANDLE virtualContext;
    SRWLOCK qcdxSubmitLock;
    struct gdikmt_context *qcdxSubmitContext;
 };
@@ -41,5 +47,9 @@ struct gdikmt_context_d3dddi {
 };
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
+HRESULT QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address);
+HRESULT QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const struct drm_msm_gem_submit *batch);
+void QcdxGpuVaClose(gdikmt_device_d3dddi *device, unsigned name);
+void QcdxGpuVaStop(gdikmt_device_d3dddi *device);
 void QcdxTraceDisplay(gdikmt_device_d3dddi *device, qcdx_display_event event,
                       UINT allocation, UINT detail, UINT flags, HRESULT hr);

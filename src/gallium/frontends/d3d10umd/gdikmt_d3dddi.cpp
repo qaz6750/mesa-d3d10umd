@@ -96,23 +96,41 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
       request->magic == QCDX_ESC_MAGIC &&
       request->nr == DRM_COMMAND_BASE + DRM_MSM_GEM_SUBMIT &&
       request->size == sizeof(struct drm_msm_gem_submit);
-   if (submit)
+   const bool valid = PrivateDriverDataSize == sizeof(*request) && request->magic == QCDX_ESC_MAGIC;
+   auto *info = valid ? reinterpret_cast<drm_msm_gem_info *>(request->data) : nullptr;
+   const bool getAddress = device->gpuVa && valid && request->nr == DRM_COMMAND_BASE + DRM_MSM_GEM_INFO &&
+      request->size == sizeof(*info) && info->info == MSM_INFO_GET_IOVA;
+   const bool close = device->gpuVa && valid && request->nr == QCDX_NR_GEM_CLOSE && request->size == sizeof(drm_gem_close);
+   if (submit || close || getAddress)
       AcquireSRWLockExclusive(&device->qcdxSubmitLock);
    D3DDDICB_ESCAPE escape;
    memset(&escape, 0, sizeof(escape));
    escape.hDevice = device->hRTDevice;
+   if (submit && device->gpuVa) escape.hContext = device->virtualContext;
    escape.pPrivateDriverData = pPrivateDriverData;
    escape.PrivateDriverDataSize = PrivateDriverDataSize;
 
+   if (getAddress) {
+      uint64_t address = 0;
+      HRESULT hr = QcdxGpuVaAddress(device, info->handle, &address);
+      if (SUCCEEDED(hr)) info->value = address;
+      request->ret = SUCCEEDED(hr) ? 0 : -5;
+      ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+      return hr;
+   }
    NTSTATUS status = device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
+   if (close && status == STATUS_SUCCESS && !request->ret)
+      QcdxGpuVaClose(device, reinterpret_cast<drm_gem_close *>(request->data)->handle);
    if (submit && status == STATUS_SUCCESS && request->ret == 0) {
       struct drm_msm_gem_submit *batch = (struct drm_msm_gem_submit *)request->data;
       struct qcdx_render_command command = {
          QCDX_ESC_MAGIC, QCDX_RENDER_SUBMIT, batch->fence, 0
       };
-      if (!device->qcdxSubmitContext)
+      if (!device->gpuVa && !device->qcdxSubmitContext)
          status = device->base.createContext(&device->base, &device->qcdxSubmitContext);
-      if (status == STATUS_SUCCESS) {
+      if (device->gpuVa)
+         status = QcdxGpuVaSubmit(device, batch);
+      else if (status == STATUS_SUCCESS) {
          struct gdikmt_context *context = device->qcdxSubmitContext;
          if (!context || !context->pCommandBuffer || context->CommandBufferSize < sizeof(command)) {
             status = STATUS_NO_MEMORY;
@@ -138,7 +156,7 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
          request->ret = -5;
       }
    }
-   if (submit)
+   if (submit || close)
       ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
    return status;
 }
@@ -286,9 +304,28 @@ gdikmt_d3dddi_createallocation(struct gdikmt_device *_device,
       options->pAllocationInfo->Flags.Primary = 1;
    }
 
+   D3DDDI_ALLOCATIONINFO2 *infos = nullptr;
+   if (device->gpuVa) {
+      infos = static_cast<D3DDDI_ALLOCATIONINFO2 *>(calloc(options->NumAllocations, sizeof(*infos)));
+      if (!infos) return STATUS_NO_MEMORY;
+      for (UINT i = 0; i < options->NumAllocations; ++i) {
+         const auto &from = options->pAllocationInfo[i];
+         infos[i].pSystemMem = from.pSystemMem;
+         infos[i].pPrivateDriverData = from.pPrivateDriverData;
+         infos[i].PrivateDriverDataSize = from.PrivateDriverDataSize;
+         infos[i].VidPnSourceId = from.VidPnSourceId;
+         infos[i].Flags.Value = from.Flags.Value;
+      }
+      createAllocation.pAllocationInfo2 = infos;
+   }
    NTSTATUS Status =
       device->KTCallbacks.pfnAllocateCb(device->hRTDevice, &createAllocation);
 
+   if (infos) {
+      if (SUCCEEDED(Status))
+         for (UINT i = 0; i < options->NumAllocations; ++i) options->pAllocationInfo[i].hAllocation = infos[i].hAllocation;
+      free(infos);
+   }
    if (FAILED(Status))
       QcdxTraceDisplay(device, QCDX_ALLOCATE_CB, 0, options->NumAllocations, device->isPrimary, Status);
    options->hResource = (HANDLE)createAllocation.hKMResource;
@@ -302,6 +339,14 @@ gdikmt_d3dddi_destroyallocation(struct gdikmt_device *_device, HANDLE hResource,
 {
    struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
 
+   if (device->gpuVa) {
+      D3DDDICB_DEALLOCATE2 release = {};
+      release.hResource = hResource;
+      release.NumAllocations = hResource ? 0 : 1;
+      release.HandleList = hResource ? nullptr : &hAllocation;
+      release.Flags.SynchronousDestroy = 1;
+      return device->KTCallbacks.pfnDeallocate2Cb(device->hRTDevice, &release);
+   }
    D3DDDICB_DEALLOCATE destroyAllocation;
    memset(&destroyAllocation, 0, sizeof(destroyAllocation));
 
@@ -322,6 +367,15 @@ gdikmt_d3dddi_lockallocation(struct gdikmt_device *_device,
 {
    struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
 
+   if (device->gpuVa) {
+      if (!device->KTCallbacks.pfnLock2Cb) return E_NOINTERFACE;
+      D3DDDICB_LOCK2 lock = {};
+      lock.hAllocation = hAllocation;
+      HRESULT hr = device->KTCallbacks.pfnLock2Cb(device->hRTDevice, &lock);
+      if (SUCCEEDED(hr)) *out_ptr = lock.pData;
+      return hr;
+   }
+   if (!device->KTCallbacks.pfnLockCb) return E_NOINTERFACE;
    D3DDDICB_LOCK lock;
    memset(&lock, 0, sizeof(lock));
    lock.Flags = flags;
@@ -407,6 +461,7 @@ void gdikmt_d3dddi_destroy(struct gdikmt_device *_device)
 {
    struct gdikmt_device_d3dddi *device = gdikmt_device_d3dddi(_device);
    AcquireSRWLockExclusive(&device->qcdxSubmitLock);
+   if (device->gpuVa) QcdxGpuVaStop(device);
    if (device->qcdxSubmitContext) {
       device->qcdxSubmitContext->destroy(device->qcdxSubmitContext);
       device->qcdxSubmitContext = NULL;
@@ -418,6 +473,7 @@ void
 gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
 {
    list_inithead(&device->sharedAllocations);
+   list_inithead(&device->virtualBuffers);
    InitializeSRWLock(&device->qcdxSubmitLock);
    device->qcdxSubmitContext = NULL;
    device->base.destroy = gdikmt_d3dddi_destroy;

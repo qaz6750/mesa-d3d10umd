@@ -166,7 +166,19 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    pDevice->device.hRTAdapter = (HANDLE)pAdapter->hRTAdapter;
    pDevice->device.hRTDevice = (HANDLE)pCreateData->hRTDevice.handle;
 
-   pDevice->device.KTCallbacks = *pCreateData->pKTCallbacks;
+   if (!pCreateData->pKTCallbacks) return E_INVALIDARG;
+   qcdx_adapter_info adapterInfo = {};
+   D3DDDICB_QUERYADAPTERINFO query = {};
+   query.pPrivateDriverData = &adapterInfo;
+   query.PrivateDriverDataSize = sizeof(adapterInfo);
+   HRESULT model = pAdapter->AdapterCallbacks.pfnQueryAdapterInfoCb(pAdapter->hRTAdapter, &query);
+   pDevice->device.gpuVa = model == S_OK && adapterInfo.magic == QCDX_ESC_MAGIC &&
+      (adapterInfo.features & QCDX_CAP_VIDMM_GPUVA);
+   pDevice->device.minimumGpuAddress = adapterInfo.minimum_address;
+   const size_t callbackBytes = pDevice->device.gpuVa ?
+      offsetof(D3DDDI_DEVICECALLBACKS, pfnDeallocate2Cb) + sizeof(pCreateData->pKTCallbacks->pfnDeallocate2Cb) :
+      offsetof(D3DDDI_DEVICECALLBACKS, pfnSignalSynchronizationObject2Cb) + sizeof(pCreateData->pKTCallbacks->pfnSignalSynchronizationObject2Cb);
+   memcpy(&pDevice->device.KTCallbacks, pCreateData->pKTCallbacks, callbackBytes);
    pDevice->device.pAdapterCallbacks = &pAdapter->AdapterCallbacks;
    pDevice->device.pDXGIBaseCallbacks = pCreateData->DXGIBaseDDI.pDXGIBaseCallbacks;
 

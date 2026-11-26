@@ -234,6 +234,13 @@ wrap_handle(struct fd_device *dev, uint32_t size, uint32_t handle)
    bo->funcs = &funcs;
 
    fd_bo_init_common(bo, dev);
+#ifdef FD_WDDM
+   if (!bo->iova) {
+      VG_BO_FREE(bo);
+      free(msm_bo);
+      return NULL;
+   }
+#endif
 
    return bo;
 }
