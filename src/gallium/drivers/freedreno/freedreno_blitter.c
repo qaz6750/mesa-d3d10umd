@@ -472,6 +472,9 @@ fd_resource_copy_region(struct pipe_context *pctx, struct pipe_resource *dst,
 
    /* else fallback to pure sw: */
 fallback:
+#ifdef FD_WDDM
+   ctx->stats.cpu_copy_regions++;
+#endif
    util_resource_copy_region(pctx, dst, dst_level, dstx, dsty, dstz, src,
                              src_level, src_box);
 }

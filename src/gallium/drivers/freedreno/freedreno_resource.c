@@ -260,6 +260,9 @@ do_blit(struct fd_context *ctx, const struct pipe_blit_info *blit,
    /* TODO size threshold too?? */
    if (fallback || !fd_blit(pctx, blit)) {
       /* do blit on cpu: */
+#ifdef FD_WDDM
+      ctx->stats.cpu_copy_regions++;
+#endif
       util_resource_copy_region(pctx, blit->dst.resource, blit->dst.level,
                                 blit->dst.box.x, blit->dst.box.y,
                                 blit->dst.box.z, blit->src.resource,

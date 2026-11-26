@@ -355,6 +355,9 @@ struct fd_context {
       uint64_t batch_total, batch_sysmem, batch_gmem, batch_nondraw,
          batch_restore;
       uint64_t staging_uploads, shadow_uploads;
+#ifdef FD_WDDM
+      uint64_t cpu_copy_regions;
+#endif
       uint64_t vs_regs, hs_regs, ds_regs, gs_regs, fs_regs;
    } stats dt;
 

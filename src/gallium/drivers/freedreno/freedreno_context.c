@@ -788,10 +788,23 @@ fd_context_init_tc(struct pipe_context *pctx, unsigned flags)
    return tc;
 }
 
-/* qcdxkm debug (d3d10umd QCDX_TIMING) */
+#ifdef FD_WDDM
+/* d3d10umd creates an unthreaded context. A Gallium debug wrapper can
+ * replace it, in which case only frontend timing is available.
+ */
 void fd_pipe_debug_fences(struct fd_pipe *pipe, uint32_t *ctl, uint32_t *last);
-void
-fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last)
+bool
+fd_wddm_batch_counts(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last,
+                     uint64_t *sysmem, uint64_t *gmem, uint64_t *nondraw, uint64_t *cpu_copy_regions)
 {
-   fd_pipe_debug_fences(fd_context(pctx)->pipe, ctl, last);
+   if (pctx->flush != fd_context_flush)
+      return false;
+   struct fd_context *ctx = fd_context(pctx);
+   fd_pipe_debug_fences(ctx->pipe, ctl, last);
+   *sysmem = ctx->stats.batch_sysmem;
+   *gmem = ctx->stats.batch_gmem;
+   *nondraw = ctx->stats.batch_nondraw;
+   *cpu_copy_regions = ctx->stats.cpu_copy_regions;
+   return true;
 }
+#endif

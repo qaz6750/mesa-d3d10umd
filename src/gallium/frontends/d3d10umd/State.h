@@ -86,6 +86,7 @@ struct Device
 
    struct gdikmt_device_d3dddi device;
    PresentTiming timing;
+   uint64_t cpuCopyRegions;
 
    struct cso_context *cso;
 

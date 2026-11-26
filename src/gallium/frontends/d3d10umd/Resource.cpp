@@ -958,6 +958,7 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
                                        src_resource, level,
                                        &box);
          } else {
+            ++pDevice->cpuCopyRegions;
             util_resource_copy_region(pipe,
                                       dst_resource, level,
                                       0, 0, layer,
@@ -1039,6 +1040,7 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
                                  src_resource, src_level,
                                  &src_box);
    } else {
+      ++pDevice->cpuCopyRegions;
       util_resource_copy_region(pipe,
                                 dst_resource, dst_level,
                                 DstX, DstY, DstZ + dst_layer,

@@ -302,7 +302,8 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
 
 extern "C" void fd_bo_cache_debug_stats(unsigned *v);
 extern "C" void fd_bo_del_debug_stats(unsigned *v);
-extern "C" void fd_context_debug_fences(struct pipe_context *pctx, uint32_t *ctl, uint32_t *last);
+extern "C" bool fd_wddm_batch_counts(struct pipe_context *, uint32_t *, uint32_t *,
+                                     uint64_t *, uint64_t *, uint64_t *, uint64_t *);
 
 static HRESULT
 FinishFence(Device *device, struct pipe_fence_handle *fence)
@@ -348,12 +349,17 @@ ReportPresentTiming(Device *pDevice)
    double ms = 1000.0 / timing.frequency.QuadPart;
    uint32_t ctl, last;
    unsigned cs[6], ds[5];
-   fd_context_debug_fences(pDevice->pipe, &ctl, &last);
-   fd_bo_cache_debug_stats(cs);
-   fd_bo_del_debug_stats(ds);
-   QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
-                " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
-                ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
+   uint64_t sysmem, gmem, nondraw, cpuCopies;
+   if (fd_wddm_batch_counts(pDevice->pipe, &ctl, &last, &sysmem, &gmem, &nondraw, &cpuCopies)) {
+      QcdxWddmLogf("BATCH device=%p lifetime gpu-sysmem=%llu gpu-gmem=%llu gpu-nondraw=%llu cpu-copy-regions=%llu\n",
+                   (void *)pDevice, (unsigned long long)sysmem, (unsigned long long)gmem,
+                   (unsigned long long)nondraw, (unsigned long long)(cpuCopies + pDevice->cpuCopyRegions));
+      fd_bo_cache_debug_stats(cs);
+      fd_bo_del_debug_stats(ds);
+      QcdxWddmLogf("FENCES control %u last %u | BO cache: hits %u miss %u busy-head %u put %u expired %u nobucket %u"
+                   " | del: suballoc %u nocache %u bo %u ring %u shared/nosync %u\n",
+                   ctl, last, cs[0], cs[1], cs[2], cs[3], cs[4], cs[5], ds[0], ds[1], ds[2], ds[3], ds[4]);
+   }
    QcdxWddmLogf("TIMING 60 presents: frame %.1f ms, flush %.2f, submit wait %.2f, present cb %.2f, "
                 "map flushes/frame %.1f (%.2f ms/frame), draws/frame %.0f in %.2f ms\n",
                 timing.frameTicks * ms / 59, timing.flushTicks * ms / 60, timing.waitTicks * ms / 60,
