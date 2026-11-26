@@ -487,7 +487,7 @@ void
 gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
 {
    list_inithead(&device->sharedAllocations);
-   list_inithead(&device->virtualBuffers);
+   for (auto &bucket : device->virtualBuffers) list_inithead(&bucket);
    InitializeSRWLock(&device->qcdxSubmitLock);
    device->qcdxSubmitContext = NULL;
    device->base.destroy = gdikmt_d3dddi_destroy;

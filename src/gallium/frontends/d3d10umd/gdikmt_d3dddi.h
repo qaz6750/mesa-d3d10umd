@@ -8,6 +8,7 @@ struct qcdx_shared_allocation {
    D3DKMT_HANDLE handle;
    unsigned boName;
    unsigned bytes;
+   bool direct; /* Dedicated linear allocation with an identical client layout. */
    unsigned vidmmPitch; /* Nonzero for canonical VidMM storage. */
    unsigned gpuPitch, gpuOffset;
    uint64_t systemMemoryMapping; /* Creator mapping passed to AllocateCb. */
@@ -30,10 +31,11 @@ struct gdikmt_device_d3dddi {
 
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
    list_head sharedAllocations;
-   bool gpuVa;
+   bool gpuVa, directGpuVa;
    volatile LONG deviceLoss; /* First GPUVA device-loss HRESULT from the submit worker. */
    uint64_t minimumGpuAddress;
-   list_head virtualBuffers;
+   list_head virtualBuffers[64];
+   struct VirtualPacket *unretiredPacket;
    D3DDDICB_CREATEPAGINGQUEUE paging;
    HANDLE virtualContext;
    SRWLOCK qcdxSubmitLock;

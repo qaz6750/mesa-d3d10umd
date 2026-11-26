@@ -97,6 +97,7 @@ struct qcdx_region_command
 /* A live GEM handle retains its backing across cache DONTNEED/WILLNEED. */
 #define QCDX_CAP_GEM_RETAINED 0x400u
 #define QCDX_CAP_VIDMM_GPUVA 0x800u
+enum { QCDX_CAP_DIRECT_GPUVA = 0x1000u };
 
 struct qcdx_capabilities
 {

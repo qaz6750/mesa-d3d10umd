@@ -193,6 +193,7 @@ QcdxWddmCreateAllocation(Device *pDevice, Resource *pResource, const D3D10DDIARG
    pResource->shared.systemMemoryMapping = memory.addr;
    pResource->shared.bytes = a.size;
    if (vidmm) {
+      pResource->shared.direct = (a.flags & QCDX_ALLOC_F_DIRECT) != 0;
       pResource->shared.vidmmPitch = a.pitch;
       pResource->shared.gpuPitch = wh.stride;
       pResource->shared.gpuOffset = wh.offset;
@@ -269,7 +270,7 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
    memset(&wh, 0, sizeof(wh));
    wh.type = WINSYS_HANDLE_TYPE_SHARED;
    // Under GPUVA each import gets a private BO. The batch mirrors the live
-   // allocation view, including its offset and read-only grant.
+   // allocation view when its layout requires a copy.
    if (!a->bo || pDevice->device.gpuVa) {
       if (a->pitch & 31) return DXGI_DDI_ERR_UNSUPPORTED;
       resource->resource = pDevice->screen->resource_create(pDevice->screen, &templat);
@@ -278,6 +279,9 @@ QcdxWddmOpen(Device *pDevice, const D3D10DDIARG_OPENRESOURCE *pOpen, Resource *r
          pipe_resource_reference(&resource->resource, NULL);
          return E_OUTOFMEMORY;
       }
+      resource->shared.direct = (a->flags & QCDX_ALLOC_F_DIRECT) && !a->bo && !a->bo_offset &&
+                               wh.modifier == DRM_FORMAT_MOD_LINEAR && wh.size == a->size &&
+                               !wh.offset && wh.stride == a->pitch;
       resource->shared.vidmmPitch = a->pitch;
       resource->shared.gpuPitch = wh.stride;
       resource->shared.gpuOffset = wh.offset;

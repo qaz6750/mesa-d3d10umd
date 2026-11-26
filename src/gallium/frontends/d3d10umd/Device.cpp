@@ -174,6 +174,7 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    HRESULT model = pAdapter->AdapterCallbacks.pfnQueryAdapterInfoCb(pAdapter->hRTAdapter, &query);
    pDevice->device.gpuVa = model == S_OK && adapterInfo.magic == QCDX_ESC_MAGIC &&
       (adapterInfo.features & QCDX_CAP_VIDMM_GPUVA);
+   pDevice->device.directGpuVa = pDevice->device.gpuVa && (adapterInfo.features & QCDX_CAP_DIRECT_GPUVA);
    pDevice->device.minimumGpuAddress = adapterInfo.minimum_address;
    const size_t callbackBytes = pDevice->device.gpuVa ?
       offsetof(D3DDDI_DEVICECALLBACKS, pfnDeallocate2Cb) + sizeof(pCreateData->pKTCallbacks->pfnDeallocate2Cb) :

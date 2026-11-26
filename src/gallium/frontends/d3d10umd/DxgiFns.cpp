@@ -254,26 +254,13 @@ RotateGpuStorage(Device *device, const DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *
    if (storage != stack)
       free(storage);
    AcquireSRWLockExclusive(&device->device.qcdxSubmitLock);
-   D3DKMT_HANDLE firstHandle = first->shared.handle;
-   unsigned firstBo = first->shared.boName;
-   auto firstStorage = first->shared;
-   for (UINT i = 1; i < count; ++i) {
-      Resource *left = CastResource(args->pResources[i - 1]);
-      Resource *right = CastResource(args->pResources[i]);
-      left->shared.handle = right->shared.handle;
-      left->shared.boName = right->shared.boName;
-      left->shared.vidmmPitch = right->shared.vidmmPitch;
-      left->shared.gpuPitch = right->shared.gpuPitch;
-      left->shared.gpuOffset = right->shared.gpuOffset;
-      left->shared.systemMemoryMapping = right->shared.systemMemoryMapping;
+   const auto firstStorage = first->shared;
+   for (UINT i = 0; i < count; ++i) {
+      auto &slot = CastResource(args->pResources[i])->shared;
+      const list_head link = slot.link;
+      slot = i + 1 < count ? CastResource(args->pResources[i + 1])->shared : firstStorage;
+      slot.link = link;
    }
-   Resource *last = CastResource(args->pResources[count - 1]);
-   last->shared.handle = firstHandle;
-   last->shared.boName = firstBo;
-   last->shared.vidmmPitch = firstStorage.vidmmPitch;
-   last->shared.gpuPitch = firstStorage.gpuPitch;
-   last->shared.gpuOffset = firstStorage.gpuOffset;
-   last->shared.systemMemoryMapping = firstStorage.systemMemoryMapping;
    ReleaseSRWLockExclusive(&device->device.qcdxSubmitLock);
    return S_OK;
 }
