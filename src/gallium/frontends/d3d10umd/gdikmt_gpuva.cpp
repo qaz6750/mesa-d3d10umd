@@ -8,9 +8,9 @@
 struct VirtualBuffer {
    list_head link;
    unsigned name, bytes;
-   bool readOnly, sharedResolved;
+   bool readOnly, sharedResolved, directWrite;
    const qcdx_shared_allocation *shared;
-   D3DKMT_HANDLE allocation;
+   D3DKMT_HANDLE allocation, directAllocation;
    uint64_t address, cpu;
 };
 
@@ -153,11 +153,28 @@ FindBuffer(gdikmt_device_d3dddi *device, unsigned name)
    return nullptr;
 }
 
-// The submit lock protects the cached slot, including a negative lookup.
+static HRESULT
+RestorePrivateMapping(gdikmt_device_d3dddi *device, VirtualBuffer *buffer)
+{
+   if (!buffer->directAllocation) return S_OK;
+   HRESULT loss = ReadAcquire(&device->deviceLoss);
+   if (FAILED(loss)) return loss;
+   UINT64 pending = 0, address = 0;
+   HRESULT hr = MapAddress(device, buffer->allocation, buffer->bytes, !buffer->readOnly, true,
+                           &address, pending, buffer->address);
+   if (FAILED(WaitPaging(device, pending)) || FAILED(hr) || address != buffer->address)
+      return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
+   buffer->directAllocation = 0;
+   return S_OK;
+}
+
+// Shared submissions retire under the submit lock. Restore the private VA
+// before a tracked allocation changes identity or its handle is released.
 void
 QcdxGpuVaInvalidateShared(gdikmt_device_d3dddi *device, unsigned name)
 {
    if (auto *buffer = FindBuffer(device, name)) {
+      RestorePrivateMapping(device, buffer);
       buffer->sharedResolved = false;
       buffer->shared = nullptr;
    }
@@ -239,7 +256,7 @@ QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address)
 struct VirtualPacket {
    struct Mapping {
       unsigned bytes;
-      VirtualBuffer *replaced; /* Restore this BO's private mapping after its fence. */
+      bool direct;
    };
    Mapping *mappings;
    D3DKMT_HANDLE *allocations;
@@ -261,16 +278,25 @@ MapSharedOperand(gdikmt_device_d3dddi *device, VirtualBuffer *buffer, const qcdx
    mapping.bytes = shared->bytes;
    if (device->directGpuVa && shared->direct && buffer->bytes == shared->bytes &&
        !buffer->readOnly && !shared->gpuOffset && shared->gpuPitch == shared->vidmmPitch) {
+      if (buffer->directAllocation == shared->handle && buffer->directWrite == write) {
+         mapping.direct = true;
+         *address = buffer->address;
+         return S_OK;
+      }
       HRESULT hr = MapAddress(device, shared->handle, shared->bytes, write, false, address, pending, buffer->address);
       if (*address) {
+         mapping.direct = true;
          if (*address != buffer->address) return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
-         mapping.replaced = buffer;
+         buffer->directAllocation = shared->handle;
+         buffer->directWrite = write;
          return hr;
       }
-      // Only synchronous rejection leaves the original mapping untouched.
+      // A synchronous rejection leaves the previous binding in place.
       if (hr != E_INVALIDARG && hr != E_NOTIMPL && hr != DXGI_ERROR_UNSUPPORTED) return hr;
       device->directGpuVa = false;
    }
+   HRESULT hr = RestorePrivateMapping(device, buffer);
+   if (FAILED(hr)) return hr;
    return MapAddress(device, shared->handle, shared->bytes, write, false, address, pending);
 }
 
@@ -290,7 +316,7 @@ ReleasePacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
    HRESULT hr = EvictPacket(device, packet);
    for (UINT i = 0; i < packet->ticket.reserved; ++i) {
       const auto &mapping = packet->mappings[i];
-      if (mapping.replaced) continue;
+      if (mapping.direct) continue;
       HRESULT released = FreeAddress(device, packet->surfaces[i].address, mapping.bytes);
       if (SUCCEEDED(hr)) hr = released;
    }
@@ -386,7 +412,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          }
          if (FAILED(hr)) break;
          // Only the canonical allocation backs a direct operand during DMA.
-         if (mapping.replaced) packet->allocations[allocations - 1] = shared->handle;
+         if (mapping.direct) packet->allocations[allocations - 1] = shared->handle;
          else packet->allocations[allocations++] = shared->handle;
       }
    }
@@ -419,16 +445,6 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          if (FAILED(hr)) return RetainPacket(device, packet);
       }
    }
-   for (UINT i = 0; i < mapped; ++i) {
-      VirtualBuffer *bo = packet->mappings[i].replaced;
-      if (!bo) continue;
-      uint64_t restored = 0;
-      HRESULT result = MapAddress(device, bo->allocation, bo->bytes, !bo->readOnly, true,
-                                  &restored, packet->pagingFence, bo->address);
-      if (FAILED(result) || restored != bo->address)
-         hr = QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
-   }
-   if (FAILED(WaitPaging(device, packet->pagingFence))) return RetainPacket(device, packet);
    HRESULT released = ReleasePacket(device, packet);
    if (SUCCEEDED(hr)) hr = released;
    return hr;
