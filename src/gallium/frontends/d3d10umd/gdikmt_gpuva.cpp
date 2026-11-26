@@ -71,9 +71,11 @@ EnsureContext(gdikmt_device_d3dddi *device)
 }
 
 static HRESULT
-WaitPaging(gdikmt_device_d3dddi *device, HRESULT hr, UINT64 value)
+WaitPaging(gdikmt_device_d3dddi *device, UINT64 value)
 {
-   if (hr != E_PENDING) return hr;
+   if (!value) return S_OK;
+   auto *completed = static_cast<volatile LONG64 *>(device->paging.FenceValueCPUVirtualAddress);
+   if (completed && static_cast<UINT64>(ReadAcquire64(completed)) >= value) return S_OK;
    D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {};
    wait.ObjectCount = 1;
    wait.ObjectHandleArray = &device->paging.hSyncObject;
@@ -81,9 +83,18 @@ WaitPaging(gdikmt_device_d3dddi *device, HRESULT hr, UINT64 value)
    return device->KTCallbacks.pfnWaitForSynchronizationObjectFromCpuCb(device->hRTDevice, &wait);
 }
 
+// Paging operations on a single queue share one monotonically increasing fence.
+static HRESULT
+RecordPaging(HRESULT hr, UINT64 value, UINT64 &pending)
+{
+   if (FAILED(hr) && hr != E_PENDING) return hr;
+   if (value > pending) pending = value;
+   return S_OK;
+}
+
 static HRESULT
 MapAddress(gdikmt_device_d3dddi *device, D3DKMT_HANDLE allocation, unsigned bytes,
-           bool write, bool execute, uint64_t *address, uint64_t base = 0)
+           bool write, bool execute, uint64_t *address, UINT64 &pending, uint64_t base = 0)
 {
    D3DDDI_MAPGPUVIRTUALADDRESS map = {};
    map.hPagingQueue = device->paging.hPagingQueue;
@@ -95,7 +106,7 @@ MapAddress(gdikmt_device_d3dddi *device, D3DKMT_HANDLE allocation, unsigned byte
    map.Protection.Execute = execute;
    HRESULT hr = device->KTCallbacks.pfnMapGpuVirtualAddressCb(device->hRTDevice, &map);
    if (SUCCEEDED(hr) || hr == E_PENDING) *address = map.VirtualAddress;
-   hr = WaitPaging(device, hr, map.PagingFenceValue);
+   hr = RecordPaging(hr, map.PagingFenceValue, pending);
    return SUCCEEDED(hr) && !*address ? E_UNEXPECTED : hr;
 }
 
@@ -178,8 +189,15 @@ QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address)
       hr = device->KTCallbacks.pfnAllocateCb(device->hRTDevice, &allocate);
       if (SUCCEEDED(hr)) buffer->allocation = info.hAllocation;
    }
-   if (SUCCEEDED(hr))
-      hr = MapAddress(device, buffer->allocation, layout.bytes, !layout.read_only, true, &buffer->address);
+   if (SUCCEEDED(hr)) {
+      UINT64 pending = 0;
+      hr = MapAddress(device, buffer->allocation, layout.bytes, !layout.read_only, true, &buffer->address, pending);
+      if (FAILED(WaitPaging(device, pending))) {
+         // Leave the allocation and its CPU backing with the runtime until teardown.
+         free(buffer);
+         return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
+      }
+   }
    if (SUCCEEDED(hr)) {
       drm_msm_gem_info bind = {};
       bind.handle = name;
@@ -202,26 +220,28 @@ struct VirtualPacket {
    } mappings[QCDX_MAX_SUBMIT_BOS];
    bool commandBuffers[QCDX_MAX_SUBMIT_BOS];
    UINT residentCount;
+   UINT64 pagingFence;
    D3DKMT_HANDLE allocations[2 * QCDX_MAX_SUBMIT_BOS];
 };
 
 static HRESULT
 MapSharedOperand(gdikmt_device_d3dddi *device, VirtualBuffer *buffer, const qcdx_shared_allocation *shared,
-                 bool write, VirtualPacket::Mapping &mapping, uint64_t *address)
+                 bool write, VirtualPacket::Mapping &mapping, uint64_t *address, UINT64 &pending)
 {
    mapping.bytes = shared->bytes;
    if (device->directGpuVa && shared->direct && buffer->bytes == shared->bytes &&
        !buffer->readOnly && !shared->gpuOffset && shared->gpuPitch == shared->vidmmPitch) {
-      HRESULT hr = MapAddress(device, shared->handle, shared->bytes, write, false, address, buffer->address);
+      HRESULT hr = MapAddress(device, shared->handle, shared->bytes, write, false, address, pending, buffer->address);
       if (*address) {
+         if (*address != buffer->address) return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
          mapping.replaced = buffer;
-         return *address == buffer->address ? hr : QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
+         return hr;
       }
       // Only synchronous rejection leaves the original mapping untouched.
       if (hr != E_INVALIDARG && hr != E_NOTIMPL && hr != DXGI_ERROR_UNSUPPORTED) return hr;
       device->directGpuVa = false;
    }
-   return MapAddress(device, shared->handle, shared->bytes, write, false, address);
+   return MapAddress(device, shared->handle, shared->bytes, write, false, address, pending);
 }
 
 static HRESULT
@@ -232,6 +252,27 @@ EvictPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
    evict.NumAllocations = packet->residentCount;
    evict.AllocationList = packet->allocations;
    return device->KTCallbacks.pfnEvictCb(device->hRTDevice, &evict);
+}
+
+static HRESULT
+ReleasePacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
+{
+   HRESULT hr = EvictPacket(device, packet);
+   for (UINT i = 0; i < packet->ticket.reserved; ++i) {
+      const auto &mapping = packet->mappings[i];
+      if (mapping.replaced) continue;
+      HRESULT released = FreeAddress(device, packet->surfaces[i].address, mapping.bytes);
+      if (SUCCEEDED(hr)) hr = released;
+   }
+   free(packet);
+   return hr;
+}
+
+static HRESULT
+RetainPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
+{
+   device->unretiredPacket = packet;
+   return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
 }
 
 HRESULT
@@ -271,7 +312,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
          uint64_t address = 0;
          bool write = (bos[i].flags & MSM_SUBMIT_BO_WRITE) != 0;
          auto &mapping = packet->mappings[mapped];
-         hr = MapSharedOperand(device, buffer, shared, write, mapping, &address);
+         hr = MapSharedOperand(device, buffer, shared, write, mapping, &address, packet->pagingFence);
          if (address) {
             ++mapped;
             operand = {address, i, shared->gpuPitch, shared->gpuOffset, 0};
@@ -283,6 +324,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
          break;
       }
    }
+   packet->ticket.reserved = mapped;
    if (SUCCEEDED(hr)) {
       D3DDDI_MAKERESIDENT resident = {};
       resident.hPagingQueue = device->paging.hPagingQueue;
@@ -290,10 +332,13 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
       resident.AllocationList = packet->allocations;
       hr = device->KTCallbacks.pfnMakeResidentCb(device->hRTDevice, &resident);
       if (resident.NumAllocations <= allocations) packet->residentCount = resident.NumAllocations;
-      hr = WaitPaging(device, hr, resident.PagingFenceValue);
+      hr = RecordPaging(hr, hr == E_PENDING ? resident.PagingFenceValue : 0, packet->pagingFence);
+      if (SUCCEEDED(hr) && resident.NumAllocations != allocations) hr = E_UNEXPECTED;
    }
+   // Drain earlier accepted mappings even if a later map or residency request failed.
+   if (FAILED(WaitPaging(device, packet->pagingFence))) return RetainPacket(device, packet);
+   packet->pagingFence = 0;
    if (SUCCEEDED(hr)) {
-      packet->ticket.reserved = mapped;
       submit.BroadcastContextCount = 1;
       submit.BroadcastContext[0] = device->virtualContext;
       submit.pPrivateDriverData = packet;
@@ -306,31 +351,21 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
          do {
             hr = GemEscape(device, DRM_COMMAND_BASE + DRM_MSM_WAIT_FENCE, wait);
          } while (hr == HRESULT_FROM_WIN32(ERROR_TIMEOUT));
-         if (FAILED(hr)) {
-            // GPU ownership is uncertain. Device teardown releases these
-            // mappings after the scheduler has stopped the context.
-            device->unretiredPacket = packet;
-            return QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
-         }
+         if (FAILED(hr)) return RetainPacket(device, packet);
       }
    }
-   HRESULT evicted = EvictPacket(device, packet);
-   if (SUCCEEDED(hr)) hr = evicted;
    for (UINT i = 0; i < mapped; ++i) {
-      const auto &mapping = packet->mappings[i];
-      HRESULT released;
-      if (mapping.replaced) {
-         VirtualBuffer *bo = mapping.replaced;
-         uint64_t restored = 0;
-         released = MapAddress(device, bo->allocation, bo->bytes, !bo->readOnly, true, &restored, bo->address);
-         if (FAILED(released) || restored != bo->address)
-            hr = QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
-      } else {
-         released = FreeAddress(device, packet->surfaces[i].address, mapping.bytes);
-      }
-      if (SUCCEEDED(hr)) hr = released;
+      VirtualBuffer *bo = packet->mappings[i].replaced;
+      if (!bo) continue;
+      uint64_t restored = 0;
+      HRESULT result = MapAddress(device, bo->allocation, bo->bytes, !bo->readOnly, true,
+                                  &restored, packet->pagingFence, bo->address);
+      if (FAILED(result) || restored != bo->address)
+         hr = QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED);
    }
-   free(packet);
+   if (FAILED(WaitPaging(device, packet->pagingFence))) return RetainPacket(device, packet);
+   HRESULT released = ReleasePacket(device, packet);
+   if (SUCCEEDED(hr)) hr = released;
    return hr;
 }
 
@@ -352,13 +387,9 @@ QcdxGpuVaStop(gdikmt_device_d3dddi *device)
       device->virtualContext = nullptr;
    }
    if (auto *packet = device->unretiredPacket) {
-      if (SUCCEEDED(stopped)) {
-         EvictPacket(device, packet);
-         for (UINT i = 0; i < packet->ticket.reserved; ++i)
-            if (!packet->mappings[i].replaced)
-               FreeAddress(device, packet->surfaces[i].address, packet->mappings[i].bytes);
-      }
-      free(packet);
+      if (SUCCEEDED(stopped)) stopped = WaitPaging(device, packet->pagingFence);
+      if (SUCCEEDED(stopped)) ReleasePacket(device, packet);
+      else free(packet); // Device teardown owns allocations with an unconfirmed fence.
       device->unretiredPacket = nullptr;
    }
    for (auto &bucket : device->virtualBuffers) {
