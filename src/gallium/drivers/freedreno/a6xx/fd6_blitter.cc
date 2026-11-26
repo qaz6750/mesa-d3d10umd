@@ -1193,6 +1193,13 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info,
 
    assert(!(info->mask & PIPE_MASK_ZS));
 
+   /* The 2D engine takes inclusive end coordinates. An empty box at
+    * the origin would program the maximum bottom-right coordinate.
+    */
+   if (!info->src.box.width || !info->src.box.height || !info->src.box.depth ||
+       !info->dst.box.width || !info->dst.box.height || !info->dst.box.depth)
+      return true;
+
    if (!can_do_blit(info))
       return false;
 

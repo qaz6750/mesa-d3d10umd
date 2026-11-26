@@ -995,6 +995,11 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
 
    Device *pDevice = CastDevice(hDevice);
    TopazStripsRestore(pDevice);
+   if (pSrcBox && (pSrcBox->left >= pSrcBox->right ||
+                   pSrcBox->top >= pSrcBox->bottom ||
+                   pSrcBox->front >= pSrcBox->back))
+      return;
+
    if (!CheckPredicate(pDevice)) {
       return;
    }
