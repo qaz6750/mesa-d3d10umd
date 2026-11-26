@@ -310,19 +310,22 @@ MapSharedOperand(gdikmt_device_d3dddi *device, VirtualBuffer *buffer, const qcdx
 }
 
 static HRESULT
-EvictPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
+EvictPacket(gdikmt_device_d3dddi *device, VirtualPacket *packet, bool completed)
 {
    if (!packet->residentCount) return S_OK;
    D3DDDICB_EVICT evict = {};
+   // Drop the residency reference at the fence. Let VidMm keep the pages
+   // on hand for the next submission while the segment has room.
+   evict.Flags.EvictOnlyIfNecessary = completed;
    evict.NumAllocations = packet->residentCount;
    evict.AllocationList = packet->allocations;
    return device->KTCallbacks.pfnEvictCb(device->hRTDevice, &evict);
 }
 
 static HRESULT
-ReleasePacket(gdikmt_device_d3dddi *device, VirtualPacket *packet)
+ReleasePacket(gdikmt_device_d3dddi *device, VirtualPacket *packet, bool completed)
 {
-   HRESULT hr = EvictPacket(device, packet);
+   HRESULT hr = EvictPacket(device, packet, completed);
    for (UINT i = 0; i < packet->ticket.reserved; ++i) {
       const auto &mapping = packet->mappings[i];
       if (mapping.direct) continue;
@@ -363,7 +366,7 @@ QcdxGpuVaDrain(gdikmt_device_d3dddi *device)
    if (!packet || FAILED(hr)) return hr;
    if (FAILED(WaitPacket(device, packet))) return RetainPacket(device, packet);
    device->unretiredPacket = nullptr;
-   hr = ReleasePacket(device, packet);
+   hr = ReleasePacket(device, packet, true);
    return FAILED(hr) ? QcdxGpuVaDeviceStatus(device, DXGI_ERROR_DEVICE_REMOVED) : S_OK;
 }
 
@@ -454,7 +457,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          if (FAILED(hr)) return RetainPacket(device, packet);
       }
    }
-   HRESULT released = ReleasePacket(device, packet);
+   HRESULT released = ReleasePacket(device, packet, SUCCEEDED(hr));
    if (SUCCEEDED(hr)) hr = released;
    return hr;
 }
@@ -479,7 +482,7 @@ QcdxGpuVaStop(gdikmt_device_d3dddi *device)
    }
    if (auto *packet = device->unretiredPacket) {
       if (SUCCEEDED(stopped)) stopped = WaitPaging(device, packet->pagingFence);
-      if (SUCCEEDED(stopped)) ReleasePacket(device, packet);
+      if (SUCCEEDED(stopped)) ReleasePacket(device, packet, false);
       else free(packet); // Device teardown owns allocations with an unconfirmed fence.
       device->unretiredPacket = nullptr;
    }
