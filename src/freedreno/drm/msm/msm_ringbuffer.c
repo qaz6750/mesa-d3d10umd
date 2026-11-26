@@ -373,9 +373,9 @@ msm_submit_flush(struct fd_submit *submit, int in_fence_fd, bool use_fence_fd)
       out_fence = NULL;
       msm_dump_submit(&req);
    } else if (!ret && out_fence) {
-      out_fence->kfence = req.fence;
       out_fence->ufence = submit->fence;
       out_fence->fence_fd = req.fence_fd;
+      p_atomic_set(&out_fence->kfence, req.fence);
    }
 
    for (unsigned o = 0; o < nr_objs; o++)

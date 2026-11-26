@@ -88,6 +88,7 @@ void fd_pipe_fence_repopulate(struct pipe_fence_handle *fence,
 void fd_pipe_fence_ref(struct pipe_fence_handle **ptr,
                        struct pipe_fence_handle *pfence);
 #ifdef FD_WDDM
+bool fd_wddm_event_signalled(struct pipe_screen *screen, struct pipe_fence_handle *fence);
 bool fd_wddm_fence_submitted(struct pipe_screen *screen, struct pipe_context *pctx,
                              struct pipe_fence_handle *fence);
 #endif

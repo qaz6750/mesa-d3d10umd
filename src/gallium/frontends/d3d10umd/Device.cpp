@@ -502,7 +502,7 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
 
    Device *device = CastDevice(hDevice);
    QcdxCountFlush(&device->device, QCDX_FLUSH_RUNTIME);
-   device->pipe->flush(device->pipe, NULL, 0);
+   fd_wddm_flush_commands(device->pipe);
    HRESULT loss = ReadAcquire(&device->device.deviceLoss);
    if (FAILED(loss)) SetError(hDevice, loss);
 }

@@ -277,9 +277,10 @@ QueryGetData(D3D10DDI_HDEVICE hDevice,                      // IN
    if (pQuery->Type == D3D10DDI_QUERY_EVENT && !state) {
       struct pipe_screen *screen = pDevice->screen;
       if (pQuery->fence) {
-         /* without DO_NOT_FLUSH the deferred work is submitted now (passing the context) */
-         ret = screen->fence_finish(screen, (Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH) ? NULL : pipe,
-                                    pQuery->fence, 0);
+         if (Flags & D3D10_DDI_GET_DATA_DO_NOT_FLUSH)
+            ret = fd_wddm_event_signalled(screen, pQuery->fence);
+         else
+            ret = screen->fence_finish(screen, pipe, pQuery->fence, 0);
       } else {
          ret = true;   /* never issued */
       }

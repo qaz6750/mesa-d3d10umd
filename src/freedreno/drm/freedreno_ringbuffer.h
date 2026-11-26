@@ -80,6 +80,7 @@ enum fd_ringbuffer_flags {
  */
 struct fd_submit *fd_submit_new(struct fd_pipe *pipe);
 #ifdef FD_WDDM
+void fd_wddm_flush_deferred(struct fd_pipe *pipe);
 void fd_submit_record_resource_access(struct fd_submit *submit, struct fd_bo *bo, bool write);
 #endif
 

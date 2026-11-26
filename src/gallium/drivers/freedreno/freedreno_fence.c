@@ -127,6 +127,30 @@ fd_pipe_fence_ref(struct pipe_fence_handle **ptr,
 }
 
 #ifdef FD_WDDM
+/* A D3D event poll with DONOTFLUSH observes the submit callback and
+ * hardware writeback without flushing the batch or waiting on the worker.
+ */
+bool
+fd_wddm_event_signalled(struct pipe_screen *screen, struct pipe_fence_handle *fence)
+{
+   if (screen->fence_finish != fd_pipe_fence_finish)
+      return screen->fence_finish(screen, NULL, fence, 0);
+
+   for (;;) {
+      if (!util_queue_fence_is_signalled(&fence->ready) || fence->batch)
+         return false;
+      if (!fence->last_fence)
+         break;
+      fence = fence->last_fence;
+   }
+   struct fd_fence *submit = fence->fence;
+   if (!submit || !p_atomic_read(&submit->kfence))
+      return false;
+   if (fence->use_fence_fd)
+      return sync_wait(submit->fence_fd, 0) == 0;
+   return fd_pipe_wait_timeout(fence->pipe, submit, 0) == 0;
+}
+
 /* Present on the submission context only needs the render callback to have
  * queued this batch. The WDDM scheduler orders the flip after its DMA fence.
  */

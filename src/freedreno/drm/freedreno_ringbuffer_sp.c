@@ -475,6 +475,20 @@ fd_submit_sp_destroy(struct fd_submit *submit)
 #ifdef FD_WDDM
 static const struct fd_submit_funcs submit_funcs;
 
+/* An explicit runtime Flush must enqueue private work even when there is
+ * no later Present or fence wait to trigger submit merging.
+ */
+void
+fd_wddm_flush_deferred(struct fd_pipe *pipe)
+{
+   struct fd_device *dev = pipe->dev;
+   simple_mtx_lock(&dev->submit_lock);
+   if (!list_is_empty(&dev->deferred_submits) &&
+       last_submit(&dev->deferred_submits)->pipe == pipe)
+      flush_deferred_submits(dev);
+   simple_mtx_unlock(&dev->submit_lock);
+}
+
 /* Only exported Gallium resources enter the WDDM allocation list. Record
  * their usage on the submit, since a BO can be read and written concurrently
  * by different contexts. Leave untracked or suballocated BOs conservative. */

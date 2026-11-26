@@ -55,7 +55,7 @@ fd_context_flush(struct pipe_context *pctx, struct pipe_fence_handle **fencep,
       /* Attaching a new batch fence marks the batch dirty and drops
        * last_fence. Satisfy an idle fence request before creating it.
        */
-      if (!flags && ctx->last_fence && ctx->in_fence_fd == -1) {
+      if (!(flags & ~PIPE_FLUSH_DEFERRED) && ctx->last_fence && ctx->in_fence_fd == -1) {
          fd_pipe_fence_ref(&fence, ctx->last_fence);
          goto out;
       }
@@ -153,6 +153,21 @@ out:
    u_trace_context_process(&ctx->trace_context,
                            !!(flags & PIPE_FLUSH_END_OF_FRAME));
 }
+
+#ifdef FD_WDDM
+void
+fd_wddm_flush_commands(struct pipe_context *pctx)
+{
+   pctx->flush(pctx, NULL, 0);
+   if (pctx->flush != fd_context_flush)
+      return;
+
+   struct fd_context *ctx = fd_context(pctx);
+   if (ctx->last_fence && ctx->last_fence->batch)
+      fd_batch_flush(ctx->last_fence->batch);
+   fd_wddm_flush_deferred(ctx->pipe);
+}
+#endif
 
 static void
 fd_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
