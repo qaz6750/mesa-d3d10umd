@@ -212,17 +212,22 @@ QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address)
 }
 
 struct VirtualPacket {
-   qcdx_render_command ticket;
-   qcdx_gpuva_operand surfaces[QCDX_MAX_SUBMIT_BOS];
    struct Mapping {
       unsigned bytes;
       VirtualBuffer *replaced; /* Restore this BO's private mapping after its fence. */
-   } mappings[QCDX_MAX_SUBMIT_BOS];
-   bool commandBuffers[QCDX_MAX_SUBMIT_BOS];
+   };
+   Mapping *mappings;
+   D3DKMT_HANDLE *allocations;
    UINT residentCount, queueId;
    UINT64 pagingFence;
-   D3DKMT_HANDLE allocations[2 * QCDX_MAX_SUBMIT_BOS];
+   qcdx_render_command ticket;
+   qcdx_gpuva_operand surfaces[];
 };
+
+static_assert(offsetof(VirtualPacket, surfaces) ==
+              offsetof(VirtualPacket, ticket) + sizeof(qcdx_render_command));
+static_assert(alignof(qcdx_gpuva_operand) >= alignof(VirtualPacket::Mapping));
+static_assert(alignof(VirtualPacket::Mapping) >= alignof(D3DKMT_HANDLE));
 
 static HRESULT
 MapSharedOperand(gdikmt_device_d3dddi *device, VirtualBuffer *buffer, const qcdx_shared_allocation *shared,
@@ -314,11 +319,19 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
    uint32_t first = 0;
    while (first < batch->nr_cmds && cmds[first].type == MSM_SUBMIT_CMD_IB_TARGET_BUF) ++first;
    if (first == batch->nr_cmds || cmds[first].submit_idx >= batch->nr_bos) return E_INVALIDARG;
-   VirtualPacket *packet = static_cast<VirtualPacket *>(calloc(1, sizeof(*packet)));
+   // Each BO can add one surface mapping and at most two residency handles.
+   // Keep all arrays in the packet so a deferred fence retains a single allocation.
+   const size_t count = batch->nr_bos;
+   const size_t perBo = sizeof(qcdx_gpuva_operand) + sizeof(VirtualPacket::Mapping) +
+                        2 * sizeof(D3DKMT_HANDLE) + sizeof(bool);
+   auto *packet = static_cast<VirtualPacket *>(calloc(1, sizeof(VirtualPacket) + count * perBo));
    if (!packet) return E_OUTOFMEMORY;
+   packet->mappings = reinterpret_cast<VirtualPacket::Mapping *>(packet->surfaces + count);
+   packet->allocations = reinterpret_cast<D3DKMT_HANDLE *>(packet->mappings + count);
+   bool *commandBuffers = reinterpret_cast<bool *>(packet->allocations + 2 * count);
    for (UINT i = 0; i < batch->nr_cmds; ++i) {
       if (cmds[i].submit_idx >= batch->nr_bos) { free(packet); return E_INVALIDARG; }
-      packet->commandBuffers[cmds[i].submit_idx] = true;
+      commandBuffers[cmds[i].submit_idx] = true;
    }
    HRESULT hr = S_OK;
    UINT allocations = 0, mapped = 0;
@@ -337,7 +350,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
          if (shared->boName != buffer->name) continue;
          privateBos = false;
          if (!shared->vidmmPitch) continue;
-         if (packet->commandBuffers[i] || !shared->bytes) { hr = E_INVALIDARG; break; }
+         if (commandBuffers[i] || !shared->bytes) { hr = E_INVALIDARG; break; }
          auto &operand = packet->surfaces[mapped];
          uint64_t address = 0;
          bool write = (bos[i].flags & MSM_SUBMIT_BO_WRITE) != 0;
@@ -371,7 +384,7 @@ QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch, b
    if (SUCCEEDED(hr)) {
       submit.BroadcastContextCount = 1;
       submit.BroadcastContext[0] = device->virtualContext;
-      submit.pPrivateDriverData = packet;
+      submit.pPrivateDriverData = &packet->ticket;
       submit.PrivateDriverDataSize = sizeof(packet->ticket) + mapped * sizeof(packet->surfaces[0]);
       hr = device->KTCallbacks.pfnSubmitCommandCb(device->hRTDevice, &submit);
       if (SUCCEEDED(hr)) {
