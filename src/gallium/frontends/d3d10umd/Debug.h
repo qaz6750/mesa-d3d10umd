@@ -32,18 +32,6 @@ DebugPrintf(const char *format, ...);
 
 
 void
-CheckHResult(HRESULT hr, const char *function, unsigned line);
-
-
-#define CHECK_NTSTATUS(status) \
-   CheckNTStatus(status, __func__, __LINE__)
-
-
-#define CHECK_HRESULT(hr) \
-   CheckHResult(hr, __func__, __LINE__)
-
-
-void
 AssertFail(const char *expr, const char *file, unsigned line, const char *function);
 
 

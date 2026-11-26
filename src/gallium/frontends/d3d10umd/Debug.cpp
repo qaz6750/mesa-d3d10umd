@@ -40,33 +40,6 @@ DebugPrintf(const char *format, ...)
 }
 
 
-/**
- * Produce a human readable message from HRESULT.
- *
- * @sa http://msdn.microsoft.com/en-us/library/ms679351(VS.85).aspx
- */
-void
-CheckHResult(HRESULT hr, const char *function, unsigned line)
-{
-   if (FAILED(hr)) {
-      LPSTR lpMessageBuffer = NULL;
-
-      FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                     FORMAT_MESSAGE_FROM_SYSTEM,
-                     NULL,
-                     hr,
-                     MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                     (LPSTR)&lpMessageBuffer,
-                     0,
-                     NULL);
-
-      DebugPrintf("%s: %u: 0x%08lX: %s", function, line, hr, lpMessageBuffer);
-
-      LocalFree(lpMessageBuffer);
-   }
-}
-
-
 void
 AssertFail(const char *expr,
            const char *file,
