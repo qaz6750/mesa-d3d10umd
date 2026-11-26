@@ -180,6 +180,15 @@ QcdxGpuVaInvalidateShared(gdikmt_device_d3dddi *device, unsigned name)
    }
 }
 
+void
+QcdxGpuVaRotateShared(gdikmt_device_d3dddi *device, unsigned name)
+{
+   if (auto *buffer = FindBuffer(device, name)) {
+      buffer->sharedResolved = false;
+      buffer->shared = nullptr;
+   }
+}
+
 static const qcdx_shared_allocation *
 FindSharedAllocation(gdikmt_device_d3dddi *device, VirtualBuffer *buffer)
 {
