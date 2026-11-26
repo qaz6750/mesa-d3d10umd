@@ -12,6 +12,16 @@ struct VirtualBuffer {
    uint64_t address, cpu;
 };
 
+HRESULT
+QcdxGpuVaDeviceStatus(gdikmt_device_d3dddi *device, HRESULT result)
+{
+   if (result == D3DDDIERR_DEVICEREMOVED) result = DXGI_ERROR_DEVICE_REMOVED;
+   if (result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET || result == DXGI_ERROR_DEVICE_HUNG)
+      InterlockedCompareExchange(&device->deviceLoss, result, S_OK);
+   HRESULT loss = ReadAcquire(&device->deviceLoss);
+   return FAILED(loss) ? loss : result;
+}
+
 template<typename T>
 static HRESULT
 GemEscape(gdikmt_device_d3dddi *device, unsigned nr, T &data)
@@ -30,6 +40,7 @@ GemEscape(gdikmt_device_d3dddi *device, unsigned nr, T &data)
    call.PrivateDriverDataSize = sizeof(packet);
    HRESULT hr = device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &call);
    if (FAILED(hr)) return hr;
+   if (packet.ret == -19) return DXGI_ERROR_DEVICE_REMOVED;
    if (packet.ret) return packet.ret == -11 ? HRESULT_FROM_WIN32(ERROR_TIMEOUT) : E_FAIL;
    memcpy(&data, packet.data, sizeof(T));
    return S_OK;
@@ -189,6 +200,8 @@ struct VirtualPacket {
 HRESULT
 QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const drm_msm_gem_submit *batch)
 {
+   HRESULT loss = ReadAcquire(&device->deviceLoss);
+   if (FAILED(loss)) return loss;
    if (!batch->nr_bos || batch->nr_bos > QCDX_MAX_SUBMIT_BOS || !batch->nr_cmds)
       return E_INVALIDARG;
    const auto *bos = reinterpret_cast<const drm_msm_gem_submit_bo *>(uintptr_t(batch->bos));

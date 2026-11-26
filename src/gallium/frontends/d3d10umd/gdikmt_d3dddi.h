@@ -31,6 +31,7 @@ struct gdikmt_device_d3dddi {
    const D3D10DDIARG_OPENRESOURCE *pOpenResource;
    list_head sharedAllocations;
    bool gpuVa;
+   volatile LONG deviceLoss; /* First GPUVA device-loss HRESULT from the submit worker. */
    uint64_t minimumGpuAddress;
    list_head virtualBuffers;
    D3DDDICB_CREATEPAGINGQUEUE paging;
@@ -47,6 +48,7 @@ struct gdikmt_context_d3dddi {
 };
 
 void gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device);
+HRESULT QcdxGpuVaDeviceStatus(gdikmt_device_d3dddi *device, HRESULT result);
 HRESULT QcdxGpuVaAddress(gdikmt_device_d3dddi *device, unsigned name, uint64_t *address);
 HRESULT QcdxGpuVaSubmit(gdikmt_device_d3dddi *device, const struct drm_msm_gem_submit *batch);
 void QcdxGpuVaClose(gdikmt_device_d3dddi *device, unsigned name);

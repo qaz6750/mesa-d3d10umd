@@ -112,11 +112,21 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
 
    if (getAddress) {
       uint64_t address = 0;
-      HRESULT hr = QcdxGpuVaAddress(device, info->handle, &address);
+      HRESULT hr = ReadAcquire(&device->deviceLoss);
+      if (SUCCEEDED(hr))
+         hr = QcdxGpuVaDeviceStatus(device, QcdxGpuVaAddress(device, info->handle, &address));
       if (SUCCEEDED(hr)) info->value = address;
       request->ret = SUCCEEDED(hr) ? 0 : -5;
       ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
       return hr;
+   }
+   if (submit && device->gpuVa) {
+      HRESULT loss = ReadAcquire(&device->deviceLoss);
+      if (FAILED(loss)) {
+         request->ret = -19;
+         ReleaseSRWLockExclusive(&device->qcdxSubmitLock);
+         return loss;
+      }
    }
    NTSTATUS status = device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
    if (close && status == STATUS_SUCCESS && !request->ret)
@@ -155,6 +165,10 @@ gdikmt_d3dddi_escape(struct gdikmt_device *_device, VOID *pPrivateDriverData,
          device->KTCallbacks.pfnEscapeCb(device->hRTAdapter, &escape);
          request->ret = -5;
       }
+   }
+   if (submit && device->gpuVa) {
+      if (status == STATUS_SUCCESS && request->ret == -19) status = DXGI_ERROR_DEVICE_REMOVED;
+      status = QcdxGpuVaDeviceStatus(device, status);
    }
    if (submit || close)
       ReleaseSRWLockExclusive(&device->qcdxSubmitLock);

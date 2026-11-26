@@ -498,9 +498,10 @@ Flush(D3D10DDI_HDEVICE hDevice)  // IN
 {
    LOG_ENTRYPOINT();
 
-   struct pipe_context *pipe = CastPipeContext(hDevice);
-
-   pipe->flush(pipe, NULL, 0);
+   Device *device = CastDevice(hDevice);
+   device->pipe->flush(device->pipe, NULL, 0);
+   HRESULT loss = ReadAcquire(&device->device.deviceLoss);
+   if (FAILED(loss)) SetError(hDevice, loss);
 }
 
 

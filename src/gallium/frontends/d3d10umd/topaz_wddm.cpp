@@ -372,11 +372,11 @@ QcdxWddmPresent(Device *pDevice, Resource *pSrc, Resource *pDst, void *pDXGICont
    pipe->flush(pipe, &fence, 0);
    if (timing.frequency.QuadPart) QueryPerformanceCounter(&flushed);
    if (!fence)
-      return E_FAIL;
+      return QcdxGpuVaDeviceStatus(&pDevice->device, E_FAIL);
    bool submitted = fd_wddm_fence_submitted(pDevice->screen, pipe, fence);
    pDevice->screen->fence_reference(pDevice->screen, &fence, NULL);
-   if (!submitted)
-      return E_FAIL;
+   HRESULT result = QcdxGpuVaDeviceStatus(&pDevice->device, submitted ? S_OK : E_FAIL);
+   if (FAILED(result)) return result;
    if (timing.frequency.QuadPart) {
       QueryPerformanceCounter(&completed);
       timing.flushTicks += flushed.QuadPart - begin.QuadPart;
