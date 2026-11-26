@@ -85,7 +85,7 @@ enum fd_debug_flag {
    FD_DBG_SERIALC      = BITFIELD_BIT(10),
    FD_DBG_SHADERDB     = BITFIELD_BIT(11),
    FD_DBG_FLUSH        = BITFIELD_BIT(12),
-   /* BIT(13) */
+   FD_DBG_MARKERS      = BITFIELD_BIT(13),
    FD_DBG_INORDER      = BITFIELD_BIT(14),
    FD_DBG_BSTAT        = BITFIELD_BIT(15),
    FD_DBG_NOGROW       = BITFIELD_BIT(16),
@@ -402,10 +402,6 @@ __OUT_IB5(struct fd_ringbuffer *ring, struct fd_ringbuffer *target)
  */
 #define HW_QUERY_BASE_REG REG_AXXX_CP_SCRATCH_REG4
 
-/* qcdxkm bring-up: markers (WFI + CP_SCRATCH write around draws/passes) always on, the KMD
- * hang dump reads CP_SCRATCH_REG5..7 to locate a hang */
-#define __EMIT_MARKER 1
-
 static inline void
 emit_marker(struct fd_ringbuffer *ring, int scratch_idx)
 {
@@ -414,7 +410,7 @@ emit_marker(struct fd_ringbuffer *ring, int scratch_idx)
    assert(reg != HW_QUERY_BASE_REG);
    if (reg == HW_QUERY_BASE_REG)
       return;
-   if (__EMIT_MARKER) {
+   if (FD_DBG(MARKERS)) {
       OUT_WFI(ring);
       OUT_PKT0(ring, reg, 1);
       OUT_RING(ring, p_atomic_inc_return(&marker_cnt));
